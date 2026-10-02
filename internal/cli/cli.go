@@ -59,6 +59,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		lg := slog.New(slog.NewJSONHandler(stderr, nil))
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		go func() {
+			// Restore default signal handling after the first signal so a
+			// second SIGINT/SIGTERM kills the process at once instead of
+			// waiting for a stuck drain.
+			<-ctx.Done()
+			stop()
+		}()
 		if err := serve(ctx, p.cfg, lg); err != nil {
 			fmt.Fprintln(stderr, "serve:", err)
 			return 1

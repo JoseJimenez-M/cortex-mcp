@@ -17,19 +17,22 @@ import (
 	"github.com/JoseJimenez-M/cortex-mcp/internal/vault"
 )
 
+// drainTimeout is how long shutdown waits for in-flight requests.
+const drainTimeout = 10 * time.Second
+
 // serve listens on cfg.Listen and runs until ctx is cancelled.
 func serve(ctx context.Context, cfg config.Config, lg *slog.Logger) error {
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.Listen, err)
 	}
-	return serveOn(ctx, cfg, ln, lg)
+	return serveOn(ctx, cfg, ln, lg, drainTimeout)
 }
 
 // serveOn serves on ln until ctx is cancelled, then drains requests for up
-// to 10s. It owns ln and every resource it opens, and releases them in
+// to drain. It owns ln and every resource it opens, and releases them in
 // reverse order of acquisition.
-func serveOn(ctx context.Context, cfg config.Config, ln net.Listener, lg *slog.Logger) error {
+func serveOn(ctx context.Context, cfg config.Config, ln net.Listener, lg *slog.Logger, drain time.Duration) error {
 	defer func() { _ = ln.Close() }() // no-op after a clean Shutdown; covers early returns
 	v, err := vault.New(cfg.Vault, vault.Options{Deny: cfg.Deny, MaxWriteBytes: cfg.Limits.MaxWriteBytes})
 	if err != nil {
@@ -67,11 +70,13 @@ func serveOn(ctx context.Context, cfg config.Config, ln net.Listener, lg *slog.L
 		return err
 	case <-ctx.Done():
 		lg.Info("cortex-mcp shutting down")
-		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		sctx, cancel := context.WithTimeout(context.Background(), drain)
 		defer cancel()
 		if err := srv.Shutdown(sctx); err != nil {
-			_ = srv.Close() // drain timed out: drop remaining connections
-			return err
+			// Force-close can leave handlers running against a closed vault;
+			// that is safe because writes are atomic.
+			_ = srv.Close()
+			return fmt.Errorf("shutdown: drain timed out after %s: %w", drain, err)
 		}
 		return nil
 	}
