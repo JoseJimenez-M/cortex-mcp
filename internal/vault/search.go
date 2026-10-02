@@ -115,11 +115,11 @@ func (v *Vault) walk(folder string, fn func(p string, info fs.FileInfo) error) e
 }
 
 // readForScan reads a note during a walk. Notes that cannot be read for a
-// vault reason (a symlink leaving the vault) are skipped, not fatal.
+// vault reason (a symlink) or a permission reason (mode 000) are skipped, not fatal.
 func (v *Vault) readForScan(p string) (*Note, bool, error) {
 	n, err := v.read(p)
 	if err != nil {
-		if CodeOf(err) != "" {
+		if CodeOf(err) != "" || errors.Is(err, fs.ErrPermission) {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -248,7 +248,7 @@ func snippet(line string, matchRune int) string {
 	if start > 0 {
 		out = "..." + out
 	}
-	if end < len(rest) {
+	if strings.TrimSpace(rest[end:]) != "" {
 		out += "..."
 	}
 	return out
@@ -308,9 +308,13 @@ func (v *Vault) Recent(since time.Time) ([]RecentNote, error) {
 		}
 		return nil
 	})
-	slices.SortStableFunc(out, func(a, b RecentNote) int { return b.Modified.Compare(a.Modified) })
+	// Stable, so notes with equal mtimes keep the walk's lexical order.
+	slices.SortStableFunc(out, newestFirst)
 	return out, err
 }
+
+// newestFirst orders RecentNote by descending modification time.
+func newestFirst(a, b RecentNote) int { return b.Modified.Compare(a.Modified) }
 
 // Backlinks returns the notes that link to rel.
 func (v *Vault) Backlinks(rel string) ([]string, error) {

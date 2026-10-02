@@ -409,3 +409,55 @@ func TestWalksSkipPermissionDenied(t *testing.T) {
 		t.Fatalf("Recent: %v", err)
 	}
 }
+
+func TestScansSkipUnreadableNotes(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs an unprivileged unix user")
+	}
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "good.md", "needle #tagx [[target]]")
+	writeFile(t, dir, "bad.md", "needle #tagx [[target]]")
+	writeFile(t, dir, "target.md", "x")
+	if err := os.Chmod(filepath.Join(dir, "bad.md"), 0); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := v.Search("needle", "", 0)
+	if err != nil || len(hits) != 1 || hits[0].Path != "good.md" {
+		t.Fatalf("Search = %+v, %v", hits, err)
+	}
+	tg, err := v.SearchTag("tagx")
+	if err != nil || !slices.Equal(tg, []string{"good.md"}) {
+		t.Fatalf("SearchTag = %v, %v", tg, err)
+	}
+	bl, err := v.Backlinks("target.md")
+	if err != nil || !slices.Equal(bl, []string{"good.md"}) {
+		t.Fatalf("Backlinks = %v, %v", bl, err)
+	}
+}
+
+func TestSnippetNoEllipsisForTrailingWhitespace(t *testing.T) {
+	line := "needle" + strings.Repeat("a", 194) + "   \r"
+	if s := snippet(line, 0); strings.HasSuffix(s, "...") {
+		t.Fatalf("snippet = %q", s)
+	}
+	if s := snippet(line+"more", 0); !strings.HasSuffix(s, "...") {
+		t.Fatalf("snippet = %q", s)
+	}
+}
+
+func TestNewestFirstKeepsTiesStable(t *testing.T) {
+	base := time.Now()
+	in := []RecentNote{
+		{"d", base}, {"b", base.Add(time.Hour)}, {"a", base}, {"e", base.Add(time.Hour)}, {"c", base},
+	}
+	// Pre-sort lexically as a walk would deliver them.
+	slices.SortFunc(in, func(a, b RecentNote) int { return strings.Compare(a.Path, b.Path) })
+	slices.SortStableFunc(in, newestFirst)
+	var got []string
+	for _, r := range in {
+		got = append(got, r.Path)
+	}
+	if !slices.Equal(got, []string{"b", "e", "a", "c", "d"}) {
+		t.Fatalf("order = %v", got)
+	}
+}

@@ -2,7 +2,7 @@
 type: decision
 status: draft
 created: 2026-10-01
-updated: 2026-10-01
+updated: 2026-10-02
 tags: [kind/repo, topic/dev]
 ---
 
@@ -127,8 +127,9 @@ edits apply without a restart.
 ## 5. Write safety
 
 1. **Path confinement.** Every path is cleaned and resolved; anything that escapes the vault root
-   (`..`, absolute paths, symlinks resolving outside) is rejected. Symlinks inside the vault are not
-   followed for writes.
+   (`..`, absolute paths) is rejected. The vault never follows symbolic links: any path that is or
+   passes through a symlink is refused with `invalid_path`, and walks skip symlinks. `os.Root` remains
+   a second line of defence that refuses any path resolving outside the vault.
 2. **Protected paths.** Fixed and not configurable off: `.git/`, `.obsidian/`, `.cortex-mcp/`,
    `.trash/` (receive-only through `delete_note`; readable, movable out). Operators can add more with
    `deny`.

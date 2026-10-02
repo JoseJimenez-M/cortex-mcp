@@ -123,3 +123,12 @@ func TestReadRejectsPathsClean(t *testing.T) {
 		}
 	}
 }
+
+func TestFileUsedAsFolderIsInvalidPath(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "c.md", "x")
+	_, err := v.Read("c.md/x.md")
+	wantCode(t, err, CodeInvalidPath)
+	_, err = v.Create("c.md/x.md", "y")
+	wantCode(t, err, CodeInvalidPath)
+}

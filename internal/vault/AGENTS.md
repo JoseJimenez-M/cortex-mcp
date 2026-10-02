@@ -29,6 +29,7 @@ from the vault or a lost note. Read the root `AGENTS.md` first.*
 
 1. Happy path on a real temp vault (`newTestVault`).
 2. Path traversal (`../`, absolute, NUL) and protected folders rejected with the right code.
-3. A symlink pointing outside the vault is refused (`CodePathOutside`).
+3. A symlink (pointing inside or outside the vault, as the file or as a parent folder) is refused with
+   `CodeInvalidPath`, and walks skip it.
 4. For writes: no `.cortex-tmp-*` file left behind; concurrent calls with `-race` keep every change.
 5. A fuzz target if it parses untrusted text.

@@ -6,6 +6,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"unicode"
 	"unicode/utf8"
 )
@@ -167,6 +168,8 @@ func fsErr(err error, rel string) error {
 		return errf(CodeNotFound, "%s does not exist", rel)
 	case errors.Is(err, fs.ErrExist):
 		return errf(CodeExists, "%s already exists", rel)
+	case errors.Is(err, syscall.ENOTDIR):
+		return errf(CodeInvalidPath, "%s: a parent of this path is a file, not a folder", rel)
 	case strings.Contains(err.Error(), "path escapes from parent"):
 		// os.Root refused a symlink that resolves outside the vault. The
 		// standard library does not export this error, so match its text;
