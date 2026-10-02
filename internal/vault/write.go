@@ -23,12 +23,15 @@ func (v *Vault) stage(p string, data []byte) (string, error) {
 	}
 	tmp := path.Join(dir, ".cortex-tmp-"+rand.Text())
 	// A rewrite must not silently change the note's permissions (a 0600
-	// private note must not become 0644); new notes get 0644.
-	mode := fs.FileMode(0o644)
-	if info, err := v.root.Stat(filepath.FromSlash(p)); err == nil && info.Mode().IsRegular() {
-		mode = info.Mode().Perm()
+	// private note must not become 0644); new notes get 0644 filtered by the
+	// umask, like any file the operator creates. Lstat, so a symlink is "not
+	// regular" and gets the default. Rename-based writes make the server's
+	// user the owner of the rewritten file: documented, not fixed.
+	mode, preserve := fs.FileMode(0o644), false
+	if info, err := v.root.Lstat(filepath.FromSlash(p)); err == nil && info.Mode().IsRegular() {
+		mode, preserve = info.Mode().Perm(), true
 	}
-	if err := v.writeFileExcl(tmp, data, mode); err != nil {
+	if err := v.writeFileExcl(tmp, data, mode, preserve); err != nil {
 		return "", fsErr(err, p)
 	}
 	return tmp, nil
@@ -36,17 +39,20 @@ func (v *Vault) stage(p string, data []byte) (string, error) {
 
 // writeFileExcl creates name (it must not exist), writes data, fsyncs and
 // closes. On any failure after the create it removes only the file it made.
-// The mode is applied with chmod so the umask cannot alter it.
-func (v *Vault) writeFileExcl(name string, data []byte, mode fs.FileMode) error {
+// With preserve, mode is copied from an existing note via chmod so the umask
+// cannot alter it; otherwise mode goes to OpenFile and the umask applies.
+func (v *Vault) writeFileExcl(name string, data []byte, mode fs.FileMode, preserve bool) error {
 	local := filepath.FromSlash(name)
 	f, err := v.root.OpenFile(local, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}
-	werr := f.Chmod(mode)
-	if werr == nil {
-		_, werr = f.Write(data)
+	if preserve {
+		// Best effort: some FUSE and FAT mounts reject setattr, and keeping
+		// the mode is a nicety, not a guarantee worth failing a write for.
+		_ = f.Chmod(mode)
 	}
+	_, werr := f.Write(data)
 	if werr == nil {
 		werr = f.Sync()
 	}
@@ -62,12 +68,12 @@ func (v *Vault) writeFileExcl(name string, data []byte, mode fs.FileMode) error 
 // linkUnsupported reports whether err means the filesystem cannot make this
 // hard link (as opposed to a real failure such as EEXIST or EIO).
 func linkUnsupported(err error) bool {
-	for _, e := range []error{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.ENOSYS, syscall.EXDEV, syscall.EMLINK} {
-		if errors.Is(err, e) {
-			return true
-		}
-	}
-	return false
+	// ErrUnsupported covers ENOSYS/ENOTSUP/EOPNOTSUPP on unix and
+	// ERROR_NOT_SUPPORTED/CALL_NOT_IMPLEMENTED on Windows.
+	return errors.Is(err, errors.ErrUnsupported) ||
+		errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EXDEV) ||
+		errors.Is(err, syscall.EMLINK)
 }
 
 // syncDir flushes the folder entry so the rename or link survives a power
@@ -121,7 +127,7 @@ func (v *Vault) writeNew(p string, data []byte) error {
 	switch {
 	case lerr == nil:
 	case linkUnsupported(lerr):
-		if err := v.writeFileExcl(p, data, 0o644); err != nil {
+		if err := v.writeFileExcl(p, data, 0o644, false); err != nil {
 			return fsErr(err, p)
 		}
 	default:

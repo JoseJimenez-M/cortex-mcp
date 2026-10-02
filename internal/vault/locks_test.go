@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -90,5 +91,35 @@ func TestLockFoldsCase(t *testing.T) {
 	case <-got:
 	case <-time.After(time.Second):
 		t.Fatal("a.md never acquired")
+	}
+}
+
+func TestLockFoldsUnicodeOrbit(t *testing.T) {
+	var l lockMap
+	unlock := l.lock("\u017fecret.md")
+	got := make(chan struct{})
+	go func() {
+		u := l.lock("Secret.md")
+		close(got)
+		u()
+	}()
+	select {
+	case <-got:
+		t.Fatal("Secret.md acquired while the long-s spelling was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("Secret.md never acquired")
+	}
+}
+
+func TestFoldMatchesEqualFold(t *testing.T) {
+	for _, c := range [][2]string{{"K", "\u212a"}, {"s", "\u017f"}, {"Straße", "STRASSE"}, {"a", "b"}, {"\u03c3", "\u03c2"}} {
+		if got, want := fold(c[0]) == fold(c[1]), strings.EqualFold(c[0], c[1]); got != want {
+			t.Errorf("fold(%q)==fold(%q) = %v, EqualFold = %v", c[0], c[1], got, want)
+		}
 	}
 }

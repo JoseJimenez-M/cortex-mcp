@@ -52,7 +52,7 @@ func (v *Vault) clean(rel string, a access, wantMD bool) (string, error) {
 	if !filepath.IsLocal(filepath.FromSlash(p)) {
 		return "", errf(CodePathOutside, "path %q leaves the vault", rel)
 	}
-	if wantMD && !strings.EqualFold(path.Ext(p), ".md") {
+	if wantMD && !foldEq(path.Ext(p), ".md") {
 		return "", errf(CodeNotMarkdown, "only .md notes are supported")
 	}
 	if err := v.protectedErr(p, a); err != nil {
@@ -64,19 +64,19 @@ func (v *Vault) clean(rel string, a access, wantMD bool) (string, error) {
 // protectedErr is the single definition of which cleaned, slash-separated
 // paths are off limits: neverAccessible names at any depth, the top-level
 // trash for writes, and the operator's deny list. Everything folds case with
-// strings.EqualFold, segment by segment, so all rules agree on what "the same
+// fold (unicode simple folding), segment by segment, so all rules agree on what "the same
 // name" means. Any later folder walk (listing, search) MUST call this same
 // helper on each entry so it cannot expose what clean refuses.
 func (v *Vault) protectedErr(p string, a access) error {
 	segs := strings.Split(p, "/")
 	for _, seg := range segs {
 		for _, n := range neverAccessible {
-			if strings.EqualFold(seg, n) {
+			if foldEq(seg, n) {
 				return errf(CodePathProtected, "%s is protected", n)
 			}
 		}
 	}
-	if a == accessWrite && strings.EqualFold(segs[0], trashDir) {
+	if a == accessWrite && foldEq(segs[0], trashDir) {
 		return errf(CodePathProtected, ".trash is receive-only: use delete_note to trash a note and move_note to restore it")
 	}
 	for _, d := range v.deny {
@@ -87,13 +87,13 @@ func (v *Vault) protectedErr(p string, a access) error {
 	return nil
 }
 
-// hasFoldPrefix reports whether prefix is a segment-wise EqualFold prefix of segs.
+// hasFoldPrefix reports whether prefix is a segment-wise fold-equal prefix of segs.
 func hasFoldPrefix(segs, prefix []string) bool {
 	if len(prefix) > len(segs) {
 		return false
 	}
 	for i, ps := range prefix {
-		if !strings.EqualFold(segs[i], ps) {
+		if !foldEq(segs[i], ps) {
 			return false
 		}
 	}

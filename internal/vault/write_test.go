@@ -237,3 +237,16 @@ func TestWriteNewConcurrentExactlyOneWins(t *testing.T) {
 		noTempFiles(t, dir)
 	}
 }
+
+func TestLinkUnsupportedCoversErrUnsupported(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	v.link = func(_, _ string) error {
+		return &os.LinkError{Op: "link", Err: fmt.Errorf("wrapped: %w", errors.ErrUnsupported)}
+	}
+	if err := v.writeNew("u.md", []byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, dir, "u.md"); got != "ok" {
+		t.Fatalf("content = %q", got)
+	}
+}
