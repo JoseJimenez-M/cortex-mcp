@@ -24,6 +24,8 @@ jobs:
         run: go tool cover -func=coverage.out | tail -1
       - name: fuzz path validation
         run: go test -run='^$' -fuzz=FuzzCleanNeverEscapes -fuzztime=20s ./internal/vault
+      - name: fuzz frontmatter split
+        run: go test -run='^$' -fuzz=FuzzSplitFrontmatter -fuzztime=20s ./internal/vault
       - name: staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.1 && staticcheck ./...
       - name: govulncheck
