@@ -32,6 +32,7 @@ Spec: [[Assistant/cortex-mcp/docs/specs/2026-10-01-cortex-mcp-design|design spec
 - Cortex rule: before each task's code is written to disk, show it to Jose with the why, and wait for approval. This plan is the first review; at execution time, present each task's diff before committing.
 - Every commit message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Work in `Assistant/cortex-mcp/` (its own git repo, branch `main`). All commands below run from that folder.
+- Read `AGENTS.md` (root) before starting, and `internal/vault/AGENTS.md` or `internal/server/AGENTS.md` before tasks in those packages: they hold the invariants every task must respect.
 
 ## File map
 
@@ -4544,7 +4545,11 @@ claude mcp remove cortex-smoke
 rm -rf "$S"
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Security review of the whole plan's diff**
+
+Dispatch a security reviewer (strongest available model) over `git diff <first commit of plan 1>..HEAD`, with the root and package `AGENTS.md` files as its checklist. It checks each invariant one by one (path confinement, symlinks, protected paths, atomic writes, error leakage, secrets in logs, auth on every route, rate limit order, instructions precedence) and returns `APPROVED` or `CHANGES REQUESTED` with findings. Fix every finding with a test first, then re-run the review. Paste the verdict into the plan-completion note in the vault.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add README.md config.example.yaml docs/specs
