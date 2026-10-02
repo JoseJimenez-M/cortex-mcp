@@ -24,6 +24,7 @@ type Vault struct {
 	root     *os.Root
 	deny     []string
 	maxWrite int64
+	maxRead  int64
 	now      func() time.Time
 }
 
@@ -51,7 +52,7 @@ func New(dir string, opts Options) (*Vault, error) {
 		}
 		deny = append(deny, d)
 	}
-	return &Vault{root: r, deny: deny, maxWrite: maxWrite, now: time.Now}, nil
+	return &Vault{root: r, deny: deny, maxWrite: maxWrite, maxRead: maxNoteBytes, now: time.Now}, nil
 }
 
 // Close releases the vault's directory handle.

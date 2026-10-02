@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -56,5 +57,30 @@ func TestParseFrontmatterKeepsDatesAsStrings(t *testing.T) {
 	}
 	if m["nested"].(map[string]any)["d"] != "2026-01-02" || m["list"].([]any)[0] != "2026-01-03" {
 		t.Fatalf("nested dates not converted: %#v", m)
+	}
+}
+
+func FuzzParseFrontmatter(f *testing.F) {
+	for _, s := range []string{"", "---\na: 1\n---\n", "---\na: {1: x, d: 2026-01-02}\n---\n", "---\n&a [*a]\n---\n", "---\n? [1]\n: x\n---\n"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		m, err := parseFrontmatter(s)
+		if err != nil {
+			return
+		}
+		if _, err := json.Marshal(m); err != nil {
+			t.Fatalf("frontmatter of %q is not JSON-safe: %v", s, err)
+		}
+	})
+}
+
+func TestParseFrontmatterNonFiniteFloatsAreJSONSafe(t *testing.T) {
+	m, err := parseFrontmatter("---\na: .nan\nb: .inf\nc: [-.inf]\n---\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := json.Marshal(m); err != nil {
+		t.Fatalf("not JSON-safe: %v (%#v)", err, m)
 	}
 }

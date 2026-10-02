@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,8 +18,8 @@ func TestReadReturnsContentFrontmatterAndVersion(t *testing.T) {
 	if n.Path != "Library/a.md" || !strings.Contains(n.Content, "body") {
 		t.Fatalf("unexpected note %+v", n)
 	}
-	// Dates stay strings: yaml.v3 keeps timestamp-like values as strings
-	// when decoding into interface{}, which is what JSON clients expect.
+	// yaml.v3 decodes timestamps to time.Time; parseFrontmatter renders them
+	// back to strings (see stringifyDates), which is what JSON clients expect.
 	if n.Frontmatter["type"] != "note" || n.Frontmatter["created"] != "2026-10-01" {
 		t.Fatalf("frontmatter = %#v", n.Frontmatter)
 	}
@@ -77,4 +78,48 @@ func TestReadRefusesSymlinksLeavingTheVault(t *testing.T) {
 	}
 	_, err = v.Read("out/secret.md")
 	wantCode(t, err, CodePathOutside)
+}
+
+func TestReadFrontmatterWithNonStringKeysIsJSONSafe(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "k.md", "---\na: {1: x, d: 2026-01-02}\n---\nbody\n")
+	n, err := v.Read("k.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := json.Marshal(n.Frontmatter); err != nil {
+		t.Fatalf("frontmatter not JSON-safe: %v (%#v)", err, n.Frontmatter)
+	}
+	a, _ := n.Frontmatter["a"].(map[string]any)
+	if a["d"] != "2026-01-02" || a["1"] != "x" {
+		t.Fatalf("a = %#v", n.Frontmatter["a"])
+	}
+}
+
+func TestReadRejectsOversizeNote(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	v.maxRead = 10
+	writeFile(t, dir, "big.md", "12345678901")
+	_, err := v.Read("big.md")
+	wantCode(t, err, CodeTooLarge)
+	writeFile(t, dir, "ok.md", "1234567890")
+	if _, err := v.Read("ok.md"); err != nil {
+		t.Fatalf("note at the limit must be readable: %v", err)
+	}
+}
+
+func TestReadRejectsPathsClean(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "x.txt", "a")
+	for rel, code := range map[string]Code{
+		"../x.md":          CodePathOutside,
+		".git/x.md":        CodePathProtected,
+		"a/.obsidian/x.md": CodePathProtected,
+		"x.txt":            CodeNotMarkdown,
+	} {
+		_, err := v.Read(rel)
+		if CodeOf(err) != code {
+			t.Errorf("Read(%q) code = %q, want %q (%v)", rel, CodeOf(err), code, err)
+		}
+	}
 }

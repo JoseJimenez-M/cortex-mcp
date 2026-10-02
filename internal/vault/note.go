@@ -3,6 +3,8 @@ package vault
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
+	"os"
 	"path/filepath"
 	"time"
 )
@@ -35,16 +37,35 @@ func (v *Vault) Read(rel string) (*Note, error) {
 
 // read loads a path already validated by clean.
 func (v *Vault) read(p string) (*Note, error) {
-	info, err := v.root.Stat(filepath.FromSlash(p))
+	local := filepath.FromSlash(p)
+	// Check before opening: opening a FIFO blocks until a writer appears.
+	pre, err := v.root.Stat(local)
 	if err != nil {
 		return nil, fsErr(err, p)
 	}
-	if info.IsDir() {
-		return nil, errf(CodeInvalidPath, "%s is a folder, not a note", p)
+	if err := checkRegular(pre, p); err != nil {
+		return nil, err
 	}
-	b, err := v.root.ReadFile(filepath.FromSlash(p))
+	f, err := v.root.Open(local)
 	if err != nil {
 		return nil, fsErr(err, p)
+	}
+	defer func() { _ = f.Close() }()
+	// Stat the open handle so size, mtime and content describe one file even
+	// if the path is replaced meanwhile; this also re-checks the type.
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fsErr(err, p)
+	}
+	if err := checkRegular(info, p); err != nil {
+		return nil, err
+	}
+	b, err := io.ReadAll(io.LimitReader(f, v.maxRead+1))
+	if err != nil {
+		return nil, fsErr(err, p)
+	}
+	if int64(len(b)) > v.maxRead {
+		return nil, errf(CodeTooLarge, "%s is larger than %d bytes", p, v.maxRead)
 	}
 	n := &Note{Path: p, Content: string(b), Version: version(b), Modified: info.ModTime().UTC()}
 	if fm, err := parseFrontmatter(n.Content); err != nil {
@@ -55,4 +76,19 @@ func (v *Vault) read(p string) (*Note, error) {
 		n.Frontmatter = fm
 	}
 	return n, nil
+}
+
+// maxNoteBytes bounds the memory one Read can allocate. The server is
+// internet-facing, so an oversized or hostile file must not exhaust RAM; the
+// limit is far above any real note.
+const maxNoteBytes = 8 << 20
+
+func checkRegular(info os.FileInfo, p string) error {
+	if info.IsDir() {
+		return errf(CodeInvalidPath, "%s is a folder, not a note", p)
+	}
+	if !info.Mode().IsRegular() {
+		return errf(CodeInvalidPath, "%s is not a regular file", p)
+	}
+	return nil
 }
