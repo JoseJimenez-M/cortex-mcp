@@ -37,7 +37,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != ":8080" || !c.BearerTokens || c.Limits.MaxWriteBytes != 1<<20 || c.Limits.RequestsPerMinute != 60 || c.Logs.MaxSizeMB != 5 || c.Logs.Keep != 3 {
+	if c.Listen != "127.0.0.1:8080" || !c.BearerTokens || c.Limits.MaxWriteBytes != 1<<20 || c.Limits.RequestsPerMinute != 60 || c.Logs.MaxSizeMB != 5 || c.Logs.Keep != 3 {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
 }
@@ -105,7 +105,8 @@ func TestValidateOK(t *testing.T) {
 	if err := valid().Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
-	for _, u := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://mcp.example.com/", "https://mcp.example.com:8443"} {
+	for _, u := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://mcp.example.com/", "https://mcp.example.com:8443",
+		"http://LOCALHOST:8080", "http://localhost.:8080", "http://127.0.0.2:8080"} {
 		c := valid()
 		c.PublicURL = u
 		if err := c.Validate(); err != nil {
@@ -142,6 +143,9 @@ func TestValidateErrors(t *testing.T) {
 		"state_dir inside":       {func(c *Config) { c.StateDir = filepath.Join(c.Vault, ".state") }, "state_dir:"},
 		"state_dir deep inside":  {func(c *Config) { c.StateDir = filepath.Join(c.Vault, "a", "b") }, "state_dir:"},
 		"url http":               {func(c *Config) { c.PublicURL = "http://mcp.example.com" }, "public_url:"},
+		"url http lookalike":     {func(c *Config) { c.PublicURL = "http://localhost.example.com" }, "public_url:"},
+		"url http ip lookalike":  {func(c *Config) { c.PublicURL = "http://127.0.0.1.nip.io" }, "public_url:"},
+		"url http unspecified":   {func(c *Config) { c.PublicURL = "http://0.0.0.0:8080" }, "public_url:"},
 		"url ftp":                {func(c *Config) { c.PublicURL = "ftp://mcp.example.com" }, "public_url:"},
 		"url empty":              {func(c *Config) { c.PublicURL = "" }, "public_url:"},
 		"url no host":            {func(c *Config) { c.PublicURL = "https://" }, "public_url:"},
@@ -224,6 +228,18 @@ func TestValidateJoinsAllProblems(t *testing.T) {
 	for _, k := range []string{"vault:", "listen:", "logs.keep:"} {
 		if !strings.Contains(err.Error(), k) {
 			t.Errorf("missing %q in %v", k, err)
+		}
+	}
+}
+
+func TestIsLoopbackHost(t *testing.T) {
+	for h, want := range map[string]bool{
+		"localhost": true, "LocalHost": true, "localhost.": true, "127.0.0.1": true, "127.1.2.3": true,
+		"::1": true, "": false, "0.0.0.0": false, "::": false, "example.com": false,
+		"localhost.example.com": false, "10.0.0.1": false,
+	} {
+		if got := IsLoopbackHost(h); got != want {
+			t.Errorf("IsLoopbackHost(%q) = %v, want %v", h, got, want)
 		}
 	}
 }

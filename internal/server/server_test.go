@@ -3,13 +3,16 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,7 +53,7 @@ func setupOpts(t *testing.T, mutate func(*config.Config), tweak func(*Options)) 
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	v, err := vault.New(vaultDir, vault.Options{})
+	v, err := vault.New(vaultDir, vault.Options{MaxWriteBytes: cfg.Limits.MaxWriteBytes})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +370,7 @@ func TestInstructionsFallbackAndTruncation(t *testing.T) {
 	defer v.Close()
 	cfg := config.Default()
 	cfg.InstructionsFile = "AGENTS.md"
-	got := Options{Config: cfg, Vault: v}.instructions()
+	got, _ := Options{Config: cfg, Vault: v}.instructions()
 	if len(got) > len(DefaultInstructions)+maxInstructionsBytes+200 || !strings.HasSuffix(got, truncationNote) {
 		t.Fatalf("not truncated: len %d", len(got))
 	}
@@ -472,8 +475,124 @@ func TestTruncationKeepsTextAfterEarlyInvalidByte(t *testing.T) {
 	defer v.Close()
 	cfg := config.Default()
 	cfg.InstructionsFile = "AGENTS.md"
-	got := Options{Config: cfg, Vault: v}.instructions()
+	got, _ := Options{Config: cfg, Vault: v}.instructions()
 	if !strings.Contains(got, "middle") || len(got) < maxInstructionsBytes {
 		t.Fatalf("text after invalid byte lost: len %d", len(got))
+	}
+}
+
+// logLines returns the msg of every JSON log line in buf.
+func logLines(t *testing.T, buf *syncBuffer) []string {
+	t.Helper()
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if l == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("log line is not JSON: %q", l)
+		}
+		out = append(out, m["msg"].(string))
+	}
+	return out
+}
+
+// syncBuffer is a bytes.Buffer safe for the server's goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func withLogger(buf *syncBuffer) func(*Options) {
+	return func(o *Options) { o.Logger = slog.New(slog.NewJSONHandler(buf, nil)) }
+}
+
+func TestServerLogsOnInjectedLogger(t *testing.T) {
+	var buf syncBuffer
+	e := setupOpts(t, nil, withLogger(&buf))
+	_ = e.store.Close() // the verifier now fails with a store error
+	if got := post(t, e.url, "Bearer "+e.secret); got != http.StatusUnauthorized && got != http.StatusInternalServerError {
+		t.Fatalf("status %d", got)
+	}
+	if got := logLines(t, &buf); !slices.Equal(got, []string{"token store failure"}) {
+		t.Fatalf("log = %v", got)
+	}
+}
+
+func TestInstructionsWarningOncePerStateChange(t *testing.T) {
+	var buf syncBuffer
+	e := setupOpts(t, func(c *config.Config) {
+		c.InstructionsFile = "missing.md"
+		c.Limits.RequestsPerMinute = 6000 // many sessions in a row
+	}, withLogger(&buf))
+	rebuild := func() string {
+		e.clock.Advance(instructionsTTL + time.Second)
+		return connect(t, e, e.secret).InitializeResult().Instructions
+	}
+	for i := 0; i < 3; i++ {
+		rebuild()
+	}
+	warn := "instructions file unreadable, using defaults"
+	if got := logLines(t, &buf); !slices.Equal(got, []string{warn}) {
+		t.Fatalf("after three failing rebuilds: log = %v", got)
+	}
+	p := filepath.Join(e.vaultDir, "missing.md")
+	if err := os.WriteFile(p, []byte("Now present."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rebuild(), "Now present.") {
+		t.Fatal("restored file not used")
+	}
+	rebuild()
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	rebuild()
+	rebuild()
+	want := []string{warn, "instructions file readable again", warn}
+	if got := logLines(t, &buf); !slices.Equal(got, want) {
+		t.Fatalf("log = %v, want %v", got, want)
+	}
+}
+
+func TestNearCapNewlineWriteReachesVault(t *testing.T) {
+	const max = 128 << 10 // above the envelope, so escaping is what matters
+	e := setup(t, func(c *config.Config) { c.Limits.MaxWriteBytes = max })
+	cs := connect(t, e, e.secret)
+	// Every newline is two bytes once JSON-escaped.
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "create_note",
+		Arguments: map[string]any{"path": "nl.md", "content": strings.Repeat("\n", max)}})
+	if err != nil || res.IsError {
+		t.Fatalf("write at the cap: err=%v result=%+v", err, res)
+	}
+	if info, err := os.Stat(filepath.Join(e.vaultDir, "nl.md")); err != nil || info.Size() != max {
+		t.Fatalf("note not written in full: %v %v", info, err)
+	}
+	res, err = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "create_note",
+		Arguments: map[string]any{"path": "over.md", "content": strings.Repeat("\n", max+1)}})
+	if err != nil {
+		t.Fatalf("one byte over the cap must reach the vault's check, got a transport error: %v", err)
+	}
+	var b strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
+	}
+	if !res.IsError || !strings.HasPrefix(b.String(), "write_too_large") {
+		t.Fatalf("result = %q, want write_too_large", b.String())
 	}
 }

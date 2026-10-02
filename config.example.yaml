@@ -12,22 +12,28 @@ state_dir: /data/state
 
 # The URL clients use to reach the server. https, host (and optional port)
 # only: no path, query, fragment, or credentials. http is accepted only for
-# localhost, 127.0.0.1, and ::1.
+# loopback hosts: localhost (any case) and loopback IPs (127.0.0.0/8, ::1).
 public_url: https://mcp.example.com
 
-# Address to bind, host:port. Default ":8080". Bind 127.0.0.1:PORT when a
-# reverse proxy on the same host terminates TLS.
-listen: ":8080"
+# Address to bind, host:port. Default "127.0.0.1:8080": loopback only, for a
+# reverse proxy on the same host that terminates TLS. In a container use
+# ":8080" so the runtime's port mapping can reach it. serve logs a warning
+# when public_url is https and this is not a loopback address.
+listen: "127.0.0.1:8080"
 
 # Optional. A .md file inside the vault (vault-relative) whose content is
 # sent to every assistant as the MCP server instructions on connect. It is
-# re-read at most every 5 seconds, so edits reach new sessions without a restart.
-instructions_file: AGENTS.md
+# re-read at most every 5 seconds, so edits reach new sessions without a
+# restart. Tools can read it but never change, move, or delete it.
+# instructions_file: AGENTS.md
 
 # Extra vault-relative files or folders no tool may read or write.
 # Entries must be non-empty, relative, free of ".." and control characters,
 # and not the vault root. .git, .obsidian, and .cortex-mcp are always
 # protected (at any depth), and .trash is receive-only; none of that is configurable.
+# An entry also protects the same path below .trash/ (delete_note keeps the
+# folder path there). Obsidian's own trash flattens paths, which no entry can
+# match: with deny entries, consider adding .trash to deny as well.
 deny: []
 
 # Must stay true until OAuth is implemented: false is refused at startup

@@ -64,7 +64,10 @@ type Config struct {
 // key missing from the file keeps its default.
 func Default() Config {
 	return Config{
-		Listen:       ":8080",
+		// Loopback by default: the server speaks plain HTTP and belongs
+		// behind a TLS proxy on the same host. Containers need ":8080" so the
+		// port is reachable from outside the container's network namespace.
+		Listen:       "127.0.0.1:8080",
 		BearerTokens: true,
 		Limits:       Limits{MaxWriteBytes: 1 << 20, RequestsPerMinute: 60},
 		Logs:         Logs{MaxSizeMB: 5, Keep: 3},
@@ -147,7 +150,20 @@ func redact(err error) error {
 	return errors.New(valueInBackticks.ReplaceAllString(err.Error(), "<value>"))
 }
 
-func isLocalHost(h string) bool { return h == "localhost" || h == "127.0.0.1" || h == "::1" }
+// IsLoopbackHost reports whether h (a URL or listen host, without port or
+// brackets) is localhost (any case, with or without a trailing dot) or a
+// loopback IP (127.0.0.0/8, ::1). It is the single definition: config uses
+// it to allow plain http, the server to decide on DNS-rebinding protection,
+// and serve to warn about a listener reachable from the network, so the
+// three can never disagree about what "local" means.
+func IsLoopbackHost(h string) bool {
+	h = strings.TrimSuffix(strings.ToLower(h), ".")
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
 
 // Validate reports every problem at once. Paths are compared lexically
 // (filepath.Clean); symlinks are not resolved here, operators own their paths.
@@ -212,12 +228,12 @@ func within(parent, child string) bool {
 }
 
 func checkPublicURL(raw string) string {
-	const hint = "must be an https URL with only a host (http is allowed only for localhost)"
+	const hint = "must be an https URL with only a host (http is allowed only for localhost and loopback IPs)"
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return hint
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLocalHost(u.Hostname())) {
+	if u.Scheme != "https" && !(u.Scheme == "http" && IsLoopbackHost(u.Hostname())) {
 		return hint
 	}
 	if strings.HasSuffix(u.Host, ":") {
@@ -307,7 +323,7 @@ func checkDeny(d string) string {
 			return `must not contain ".."`
 		}
 	}
-	if c := path.Clean(d); c == "." || c == "" {
+	if path.Clean(d) == "." {
 		return "refers to the vault root and would match nothing"
 	}
 	return ""

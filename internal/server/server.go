@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,6 +48,14 @@ const (
 	idleSessionTimeout = 30 * time.Minute
 	// envelopeBytes is the room for the JSON-RPC envelope around a write.
 	envelopeBytes = 64 << 10
+	// escapeFactor: JSON escaping can double a write's content on the wire
+	// (every newline, quote, or backslash becomes two bytes), so a note at
+	// max_write_bytes must still fit in the body and be judged by the
+	// vault's own size check, with a clear write_too_large, instead of an
+	// opaque HTTP 413. Content made of control characters or <, >, & (six
+	// bytes each as \u00XX) can still exceed this; the cap bounds memory, it
+	// does not promise every byte pattern up to max_write_bytes.
+	escapeFactor = 2
 )
 
 // Options are the server's dependencies.
@@ -58,6 +65,9 @@ type Options struct {
 	Tokens *tokens.Store
 	Log    *logs.Logger
 	Now    func() time.Time
+	// Logger receives operational warnings and errors; nil means
+	// slog.Default().
+	Logger *slog.Logger
 
 	idleTimeout time.Duration // tests only; zero means idleSessionTimeout
 }
@@ -69,18 +79,21 @@ func New(o Options) http.Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.Logger == nil {
+		o.Logger = slog.Default()
+	}
 	idle := o.idleTimeout
 	if idle <= 0 {
 		idle = idleSessionTimeout
 	}
 	cache := &serverCache{o: o}
 	mcpHandler := mcp.NewStreamableHTTPHandler(cache.get, &mcp.StreamableHTTPOptions{
-		MaxRequestBodyBytes:        o.Config.Limits.MaxWriteBytes + envelopeBytes,
+		MaxRequestBodyBytes:        escapeFactor*o.Config.Limits.MaxWriteBytes + envelopeBytes,
 		DisableLocalhostProtection: !isLocalURL(o.Config.PublicURL),
 		SessionTimeout:             idle,
 		Logger:                     nil, // SDK logging stays off; nothing here may log request headers
 	})
-	requireToken := auth.RequireBearerToken(bearerVerifier(o.Tokens), &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})
+	requireToken := auth.RequireBearerToken(bearerVerifier(o.Tokens, o.Logger), &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", noStore(requireToken(rateLimit(o.Config.Limits.RequestsPerMinute, mcpHandler))))
@@ -149,6 +162,10 @@ type serverCache struct {
 	mu      sync.Mutex
 	server  *mcp.Server
 	expires time.Time
+	// instrFailing is whether the last rebuild could not read the
+	// instructions file, so the warning is logged once per change of state
+	// instead of on every rebuild (every 5 seconds under traffic).
+	instrFailing bool
 }
 
 func (c *serverCache) get(*http.Request) *mcp.Server {
@@ -158,22 +175,30 @@ func (c *serverCache) get(*http.Request) *mcp.Server {
 	if c.server != nil && now.Before(c.expires) {
 		return c.server
 	}
-	s := mcp.NewServer(&mcp.Implementation{Name: "cortex-mcp", Version: Version}, &mcp.ServerOptions{Instructions: c.o.instructions()})
-	tools.Register(s, tools.Deps{Vault: c.o.Vault, Log: c.o.Log, LogDir: c.o.Config.StateDir, Now: c.o.Now})
+	instr, err := c.o.instructions()
+	switch {
+	case err != nil && !c.instrFailing:
+		c.o.Logger.Warn("instructions file unreadable, using defaults", "err", err)
+	case err == nil && c.instrFailing:
+		c.o.Logger.Info("instructions file readable again")
+	}
+	c.instrFailing = err != nil
+	s := mcp.NewServer(&mcp.Implementation{Name: "cortex-mcp", Version: Version}, &mcp.ServerOptions{Instructions: instr})
+	tools.Register(s, tools.Deps{Vault: c.o.Vault, Log: c.o.Log, LogDir: c.o.Config.StateDir, Now: c.o.Now, Logger: c.o.Logger})
 	c.server, c.expires = s, now.Add(instructionsTTL)
 	return s
 }
 
 // instructions is DefaultInstructions followed by the vault's file, cut to
-// maxInstructionsBytes. An unreadable file falls back to the defaults.
-func (o Options) instructions() string {
+// maxInstructionsBytes. An unreadable file falls back to the defaults and
+// returns the read error for the caller to log.
+func (o Options) instructions() (string, error) {
 	if o.Config.InstructionsFile == "" {
-		return DefaultInstructions
+		return DefaultInstructions, nil
 	}
 	n, err := o.Vault.Read(o.Config.InstructionsFile)
 	if err != nil {
-		slog.Warn("instructions file unreadable, using defaults", "err", err)
-		return DefaultInstructions
+		return DefaultInstructions, err
 	}
 	text := n.Content
 	if len(text) > maxInstructionsBytes {
@@ -187,21 +212,21 @@ func (o Options) instructions() string {
 		text = text[:cut]
 		text = strings.TrimRight(text, "\n") + truncationNote
 	}
-	return DefaultInstructions + "\n\n" + text
+	return DefaultInstructions + "\n\n" + text, nil
 }
 
 // bearerVerifier maps a secret to its client name. Malformed secrets are
 // rejected inside tokens.Verify before any database lookup, so junk requests
 // are cheap. Store failures return a fixed message: the SDK writes the error
 // text into the response body, which must not expose internals.
-func bearerVerifier(store *tokens.Store) auth.TokenVerifier {
+func bearerVerifier(store *tokens.Store, lg *slog.Logger) auth.TokenVerifier {
 	return func(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 		name, err := store.Verify(token)
 		if errors.Is(err, tokens.ErrInvalid) {
 			return nil, auth.ErrInvalidToken
 		}
 		if err != nil {
-			slog.Error("token store failure", "err", err)
+			lg.Error("token store failure", "err", err)
 			return nil, errors.New("authentication unavailable")
 		}
 		return &auth.TokenInfo{UserID: name, Extra: map[string]any{"client": name}}, nil
@@ -240,17 +265,12 @@ func rateLimit(perMinute int, next http.Handler) http.Handler {
 	})
 }
 
-// isLocalURL reports whether the URL's host is localhost (any case, with or
-// without a trailing dot) or a loopback IP (127.0.0.0/8, ::1).
+// isLocalURL reports whether the URL's host is a loopback host, as defined
+// once by config.IsLoopbackHost.
 func isLocalURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false
 	}
-	h := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	if h == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
+	return config.IsLoopbackHost(u.Hostname())
 }

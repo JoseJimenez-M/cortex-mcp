@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,9 +24,16 @@ import (
 type env struct {
 	cs          *mcp.ClientSession
 	dir, logDir string
+	v           *vault.Vault
 }
 
 func connect(t *testing.T) env {
+	t.Helper()
+	return connectWith(t, nil)
+}
+
+// connectWith is connect with a hook to adjust the Deps before Register.
+func connectWith(t *testing.T, tweak func(*Deps)) env {
 	t.Helper()
 	dir, logDir := t.TempDir(), t.TempDir()
 	v, err := vault.New(dir, vault.Options{})
@@ -36,7 +45,11 @@ func connect(t *testing.T) env {
 		t.Fatal(err)
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
-	Register(s, Deps{Vault: v, Log: lg, LogDir: logDir, Now: time.Now})
+	d := Deps{Vault: v, Log: lg, LogDir: logDir, Now: time.Now}
+	if tweak != nil {
+		tweak(&d)
+	}
+	Register(s, d)
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	ss, err := s.Connect(ctx, st, nil)
@@ -53,7 +66,7 @@ func connect(t *testing.T) env {
 		_ = lg.Close()
 		_ = v.Close()
 	})
-	return env{cs: cs, dir: dir, logDir: logDir}
+	return env{cs: cs, dir: dir, logDir: logDir, v: v}
 }
 
 func call(t *testing.T, e env, name string, args map[string]any) *mcp.CallToolResult {
@@ -145,7 +158,7 @@ func TestErrorsAreToolErrorsWithCodes(t *testing.T) {
 }
 
 func TestInternalErrorsHideDetails(t *testing.T) {
-	err := toolErr("read_note", errors.New("open /home/someone/vault/a.md: permission denied"))
+	err := Deps{}.toolErr("read_note", errors.New("open /home/someone/vault/a.md: permission denied"))
 	if strings.Contains(err.Error(), "/home") || !strings.HasPrefix(err.Error(), "internal_error") {
 		t.Fatalf("toolErr leaked: %v", err)
 	}
@@ -402,5 +415,38 @@ func TestRecentCreditsMoveDestination(t *testing.T) {
 	decode(t, call(t, e, "recent", map[string]any{"days": 1}), &recent)
 	if len(recent.Notes) != 1 || recent.Notes[0].Path != "b.md" || !slices.Contains(recent.Notes[0].Clients, "unknown") {
 		t.Fatalf("recent = %+v", recent)
+	}
+}
+
+// jsonLines decodes every line of buf as one JSON object.
+func jsonLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if l == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("log line is not JSON: %q", l)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func TestInternalErrorLogsOnInjectedLogger(t *testing.T) {
+	var buf bytes.Buffer
+	e := connectWith(t, func(d *Deps) { d.Logger = slog.New(slog.NewJSONHandler(&buf, nil)) })
+	if err := e.v.Close(); err != nil { // every later file access fails with a non-vault error
+		t.Fatal(err)
+	}
+	res := call(t, e, "read_note", map[string]any{"path": "a.md"})
+	if !res.IsError || !strings.HasPrefix(text(res), "internal_error") {
+		t.Fatalf("want internal_error, got %q", text(res))
+	}
+	lines := jsonLines(t, &buf)
+	if len(lines) != 1 || lines[0]["msg"] != "tool failed" || lines[0]["tool"] != "read_note" || lines[0]["level"] != "ERROR" {
+		t.Fatalf("log lines = %v", lines)
 	}
 }
