@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,6 +43,10 @@ const (
 	// only when a session opens, so rebuilding each time would re-read the
 	// file and re-register every tool per request.
 	instructionsTTL = 5 * time.Second
+	// idleSessionTimeout closes sessions that see no request for this long:
+	// clients that vanish without DELETE would otherwise pin memory forever
+	// on a small shared VPS. No config key yet.
+	idleSessionTimeout = 30 * time.Minute
 	// envelopeBytes is the room for the JSON-RPC envelope around a write.
 	envelopeBytes = 64 << 10
 )
@@ -53,6 +58,8 @@ type Options struct {
 	Tokens *tokens.Store
 	Log    *logs.Logger
 	Now    func() time.Time
+
+	idleTimeout time.Duration // tests only; zero means idleSessionTimeout
 }
 
 // New returns the HTTP handler. There is deliberately no CORS handling: MCP
@@ -62,10 +69,15 @@ func New(o Options) http.Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	idle := o.idleTimeout
+	if idle <= 0 {
+		idle = idleSessionTimeout
+	}
 	cache := &serverCache{o: o}
 	mcpHandler := mcp.NewStreamableHTTPHandler(cache.get, &mcp.StreamableHTTPOptions{
 		MaxRequestBodyBytes:        o.Config.Limits.MaxWriteBytes + envelopeBytes,
 		DisableLocalhostProtection: !isLocalURL(o.Config.PublicURL),
+		SessionTimeout:             idle,
 		Logger:                     nil, // SDK logging stays off; nothing here may log request headers
 	})
 	requireToken := auth.RequireBearerToken(bearerVerifier(o.Tokens), &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})
@@ -165,10 +177,14 @@ func (o Options) instructions() string {
 	}
 	text := n.Content
 	if len(text) > maxInstructionsBytes {
-		text = text[:maxInstructionsBytes]
-		for !utf8.ValidString(text) { // drop a rune cut in half
-			text = text[:len(text)-1]
+		// Back off at most 3 bytes to a rune start so a cut rune is dropped,
+		// without scanning for validity (an invalid byte early in the file
+		// must not eat the rest).
+		cut := maxInstructionsBytes
+		for i := 0; i < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(text[cut]); i++ {
+			cut--
 		}
+		text = text[:cut]
 		text = strings.TrimRight(text, "\n") + truncationNote
 	}
 	return DefaultInstructions + "\n\n" + text
@@ -224,14 +240,17 @@ func rateLimit(perMinute int, next http.Handler) http.Handler {
 	})
 }
 
+// isLocalURL reports whether the URL's host is localhost (any case, with or
+// without a trailing dot) or a loopback IP (127.0.0.0/8, ::1).
 func isLocalURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false
 	}
-	switch u.Hostname() {
-	case "localhost", "127.0.0.1", "::1":
+	h := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if h == "localhost" {
 		return true
 	}
-	return false
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }

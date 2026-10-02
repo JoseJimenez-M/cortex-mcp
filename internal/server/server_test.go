@@ -36,6 +36,11 @@ type env struct {
 
 func setup(t *testing.T, mutate func(*config.Config)) env {
 	t.Helper()
+	return setupOpts(t, mutate, nil)
+}
+
+func setupOpts(t *testing.T, mutate func(*config.Config), tweak func(*Options)) env {
+	t.Helper()
 	vaultDir, stateDir := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(vaultDir, "AGENTS.md"), []byte("Write in English."), 0o644); err != nil {
 		t.Fatal(err)
@@ -63,7 +68,11 @@ func setup(t *testing.T, mutate func(*config.Config)) env {
 	}
 	clk := &clock{}
 	clk.ns.Store(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC).UnixNano())
-	ts := httptest.NewServer(New(Options{Config: cfg, Vault: v, Tokens: store, Log: lg, Now: clk.Now}))
+	opts := Options{Config: cfg, Vault: v, Tokens: store, Log: lg, Now: clk.Now}
+	if tweak != nil {
+		tweak(&opts)
+	}
+	ts := httptest.NewServer(New(opts))
 	t.Cleanup(func() {
 		ts.Close()
 		_ = lg.Close()
@@ -390,5 +399,81 @@ func TestSessionBoundToToken(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("hijack attempt: status %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestIdleSessionsAreClosed(t *testing.T) {
+	e := setupOpts(t, nil, func(o *Options) { o.idleTimeout = 100 * time.Millisecond })
+	cs := connect(t, e, e.secret)
+	time.Sleep(600 * time.Millisecond)
+	req, _ := http.NewRequest(http.MethodPost, e.url+"/mcp", strings.NewReader(pingBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+e.secret)
+	req.Header.Set("Mcp-Session-Id", cs.ID())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("idle session: status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestIsLocalURL(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"http://localhost": true, "http://LOCALHOST:8080": true, "http://localhost.": true,
+		"http://127.0.0.1": true, "http://127.1.2.3:9": true, "http://[::1]:80": true,
+		"https://example.com": false, "http://10.0.0.1": false, "http://localhost.evil.com": false,
+		"": false, "::bad::": false,
+	} {
+		if got := isLocalURL(raw); got != want {
+			t.Errorf("isLocalURL(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
+func rebindStatus(t *testing.T, e env) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, e.url+"/mcp", strings.NewReader(pingBody))
+	req.Host = "attacker.example"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+e.secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestRebindingProtectionFollowsPublicURL(t *testing.T) {
+	if code := rebindStatus(t, setup(t, nil)); code != http.StatusForbidden {
+		t.Fatalf("localhost public_url: status %d, want 403", code)
+	}
+	pub := setup(t, func(c *config.Config) { c.PublicURL = "https://notes.example.com" })
+	if code := rebindStatus(t, pub); code == http.StatusForbidden {
+		t.Fatal("public public_url: protection should be off")
+	}
+}
+
+func TestTruncationKeepsTextAfterEarlyInvalidByte(t *testing.T) {
+	vaultDir := t.TempDir()
+	body := "start\xffmiddle" + strings.Repeat("x", maxInstructionsBytes)
+	if err := os.WriteFile(filepath.Join(vaultDir, "AGENTS.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v, err := vault.New(vaultDir, vault.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	cfg := config.Default()
+	cfg.InstructionsFile = "AGENTS.md"
+	got := Options{Config: cfg, Vault: v}.instructions()
+	if !strings.Contains(got, "middle") || len(got) < maxInstructionsBytes {
+		t.Fatalf("text after invalid byte lost: len %d", len(got))
 	}
 }

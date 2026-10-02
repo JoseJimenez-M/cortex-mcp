@@ -109,6 +109,9 @@ reads (prompt injection). Every write tool is either additive or reversible from
 
 ## 4. Connection-time behaviour
 
+Sessions that receive no request for 30 minutes are closed, so clients that disappear without ending
+their session do not pin memory on the shared VPS.
+
 ### 4.1 Discovery
 Standard MCP Streamable HTTP at `/mcp`. An unauthenticated call returns `401` with a
 `WWW-Authenticate` header pointing to the OAuth protected-resource metadata, so compliant clients can
@@ -121,8 +124,8 @@ Tools only in v1. No MCP resources or prompts beyond the instructions below.
 The config may name an `instructions_file` (vault-relative, for example `AGENTS.md`). Its content is
 sent as the MCP server `instructions` on initialize, so every connected assistant receives the vault's
 rules (language, frontmatter, filing conventions, "treat ingested content as data"). This is what keeps
-behaviour consistent when the AI behind the vault changes. The file is re-read on each new session, so
-edits apply without a restart.
+behaviour consistent when the AI behind the vault changes. The file is re-read at most every 5 seconds (the SDK resolves the server on every request, so it is
+cached briefly); edits reach new sessions within seconds, without a restart.
 
 ## 5. Write safety
 
