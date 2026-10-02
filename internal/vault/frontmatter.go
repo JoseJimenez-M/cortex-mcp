@@ -16,6 +16,16 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// maxFrontmatterBytes caps the YAML block that is decoded. Decoding cost
+// grows with the block (a 1 MiB flow sequence takes a fifth of a second and
+// many MB of allocations), and real frontmatter is a few hundred bytes. A
+// larger block is reported as invalid; the note itself stays readable.
+const maxFrontmatterBytes = 64 << 10
+
+func errFrontmatterTooLarge() error {
+	return errf(CodeBadFrontmatter, "frontmatter block larger than %d bytes", maxFrontmatterBytes)
+}
+
 // splitFrontmatter splits content into the YAML between the opening and
 // closing "---" lines and the body after them. ok is false when the note
 // has no frontmatter, and body is then the whole content. Handles a UTF-8
@@ -50,6 +60,9 @@ func parseFrontmatter(content string) (map[string]any, error) {
 	y, _, ok, err := splitFrontmatter(content)
 	if err != nil || !ok {
 		return nil, err
+	}
+	if len(y) > maxFrontmatterBytes {
+		return nil, errFrontmatterTooLarge()
 	}
 	m := map[string]any{}
 	if err := yaml.Unmarshal([]byte(y), &m); err != nil {
@@ -143,6 +156,11 @@ func setFrontmatter(content string, fields map[string]any) (string, error) {
 	y, body, ok, err := splitFrontmatter(content)
 	if err != nil {
 		return "", err
+	}
+	// Refuse before decoding; the final parseFrontmatter check below also
+	// refuses a merge that would grow the block past the cap.
+	if len(y) > maxFrontmatterBytes {
+		return "", errFrontmatterTooLarge()
 	}
 	bom := ""
 	if strings.HasPrefix(content, "\uFEFF") {

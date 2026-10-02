@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,17 @@ const maxTrashAttempts = 1000
 // with EEXIST, followed by removing src. Content, mode and mtime are those of
 // the original file because nothing is rewritten. A crash between the link and
 // the remove leaves the note under both names: duplicated, never lost. If the
-// remove fails, the new name is dropped again (best effort).
+// remove fails, undoLink decides: a source already gone means the move
+// succeeded; the new name is dropped again only while both names are still
+// the same file.
+//
+// The external-rewrite race (known, not fixed): an editor or sync tool that
+// saves src by renaming a new file over it between the link and the remove
+// leaves dst with the content from before the save. If the remove then
+// succeeds it deletes the saved version (that one external edit is lost); if
+// it fails, undoLink keeps both names. The window is two syscalls wide, and
+// the vault lock cannot close it because it does not cover external
+// processes; unlinking by inode instead of by name has no portable API.
 //
 // Filesystems without hard links (FAT, some FUSE and network mounts) fall
 // back to Lstat then rename. A target created in the few microseconds between
@@ -47,12 +58,8 @@ func (v *Vault) rename(src, dst string) error {
 	lerr := v.link(lsrc, ldst)
 	switch {
 	case lerr == nil:
-		if err := v.root.Remove(lsrc); err != nil {
-			// src still holds the inode, so dropping the new name loses
-			// nothing. Best effort: if this also fails the note stays under
-			// both names (duplicated, never lost).
-			_ = v.root.Remove(ldst)
-			return fsErr(err, src)
+		if err := v.remove(lsrc); err != nil {
+			return v.undoLink(src, dst, err)
 		}
 	case linkUnsupported(lerr):
 		if err := v.absent(dst); err != nil {
@@ -67,6 +74,27 @@ func (v *Vault) rename(src, dst string) error {
 	v.syncDir(dst)
 	v.syncDir(src)
 	return nil
+}
+
+// undoLink handles a failed removal of src after src was linked to dst.
+// If src is already gone (an external process removed or moved it in the
+// meantime) the note lives at dst and the move succeeded. Otherwise dst is
+// dropped only when both names are still the same file: then src holds the
+// inode and nothing is lost. If an external writer replaced src meanwhile
+// (an editor's atomic save renames a new file over it), dst is the only copy
+// of the content that was moved, so it stays and the note is duplicated under
+// two names with different content: never lost.
+func (v *Vault) undoLink(src, dst string, rmErr error) error {
+	if errors.Is(rmErr, fs.ErrNotExist) {
+		return nil
+	}
+	si, serr := v.root.Lstat(filepath.FromSlash(src))
+	di, derr := v.root.Lstat(filepath.FromSlash(dst))
+	if serr == nil && derr == nil && os.SameFile(si, di) {
+		// Best effort: if this also fails the note stays under both names.
+		_ = v.root.Remove(filepath.FromSlash(dst))
+	}
+	return fsErr(rmErr, src)
 }
 
 // absent returns CodeExists when anything (even a dangling symlink) is at p.
@@ -107,6 +135,9 @@ func (v *Vault) Move(from, to string) (stillLinking []string, complete bool, err
 	if err := v.noSymlinks(dst); err != nil {
 		return nil, false, err
 	}
+	if err := v.checkDisk(); err != nil {
+		return nil, false, err
+	}
 	unlock := v.locks.lock(src, dst)
 	err = v.rename(src, dst)
 	unlock()
@@ -137,6 +168,9 @@ func (v *Vault) Delete(rel string) (string, error) {
 	// .trash and its subfolders must be real folders: a link there would
 	// redirect the note out of the vault's protected layout.
 	if err := v.noSymlinks(path.Dir(base)); err != nil {
+		return "", err
+	}
+	if err := v.checkDisk(); err != nil {
 		return "", err
 	}
 	ext := path.Ext(base)

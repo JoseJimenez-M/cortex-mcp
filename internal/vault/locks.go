@@ -5,25 +5,44 @@ import (
 	"sync"
 )
 
-// lockMap serializes writes per note. Entries are never removed: the map is
-// bounded by the number of notes ever written, a few KB for a personal vault.
+// lockMap serializes writes per note. Entries are reference-counted and
+// removed when the last holder or waiter unlocks, so the map only holds
+// paths with a write in flight. Without that, an assistant sending writes to
+// many distinct (even non-existent) paths would grow it without bound.
 type lockMap struct {
 	mu sync.Mutex
-	m  map[string]*sync.Mutex
+	m  map[string]*lockEntry
 }
 
-func (l *lockMap) get(key string) *sync.Mutex {
+type lockEntry struct {
+	mu   sync.Mutex
+	refs int // holders plus waiters; guarded by lockMap.mu
+}
+
+// acquire returns the entry for key with its reference taken.
+func (l *lockMap) acquire(key string) *lockEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.m == nil {
-		l.m = make(map[string]*sync.Mutex)
+		l.m = make(map[string]*lockEntry)
 	}
-	mu, ok := l.m[key]
+	e, ok := l.m[key]
 	if !ok {
-		mu = &sync.Mutex{}
-		l.m[key] = mu
+		e = &lockEntry{}
+		l.m[key] = e
 	}
-	return mu
+	e.refs++
+	return e
+}
+
+// release drops one reference and deletes the entry when it was the last.
+func (l *lockMap) release(key string, e *lockEntry) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e.refs--
+	if e.refs == 0 {
+		delete(l.m, key)
+	}
 }
 
 // lock locks every key in sorted order, so two moves over the same pair of
@@ -37,14 +56,15 @@ func (l *lockMap) lock(keys ...string) func() {
 	}
 	slices.Sort(ks)
 	ks = slices.Compact(ks)
-	mus := make([]*sync.Mutex, len(ks))
+	es := make([]*lockEntry, len(ks))
 	for i, k := range ks {
-		mus[i] = l.get(k)
-		mus[i].Lock()
+		es[i] = l.acquire(k)
+		es[i].mu.Lock()
 	}
 	return func() {
-		for i := len(mus) - 1; i >= 0; i-- {
-			mus[i].Unlock()
+		for i := len(es) - 1; i >= 0; i-- {
+			es[i].mu.Unlock()
+			l.release(ks[i], es[i])
 		}
 	}
 }

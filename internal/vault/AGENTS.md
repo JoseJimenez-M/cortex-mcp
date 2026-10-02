@@ -21,8 +21,13 @@ from the vault or a lost note. Read the root `AGENTS.md` first.*
   could alias a denied path. Call `v.noSymlinks(p)` right after `clean` in every method that touches an
   existing path (`read` and `Create` do; folder operations use `checkFolder`). Walks skip symlink entries.
   `os.Root` stays the second line of defence against links leaving the vault.
-- **Protected paths** (`neverAccessible`, `trashDir`, `deny`) are enforced in `clean` and again by
+- **Protected paths** (`neverAccessible`, `trashDir`, `deny`, also matched below `.trash/`, and the
+  `readOnly` instructions file for writes and moves) are enforced in `clean` and again by
   `hidden`/`visible` in walks. A new operation must respect both.
+- **Every write checks the disk floor** (`v.checkDisk()`, `disk_low` below `minFreeBytes`) after path
+  validation and before taking a lock.
+- **Scans that do not need frontmatter read with `readContent`**, never `read`: decoding YAML per note
+  is the expensive part of a walk. Frontmatter blocks over `maxFrontmatterBytes` are never decoded.
 - **Name folding** goes through `fold`/`foldEq` (fold.go) everywhere, locks included. Unicode normalization (NFC vs NFD) is not folded: a known limit.
 
 ## Tests a new operation must have

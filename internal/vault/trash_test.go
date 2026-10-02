@@ -3,9 +3,11 @@ package vault
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -251,5 +253,132 @@ func TestRestoreFromTrashReportsBacklinks(t *testing.T) {
 	still, complete, err := v.Move(".trash/old.md", "old.md")
 	if err != nil || !complete || !slices.Equal(still, []string{"b.md"}) {
 		t.Fatalf("Move = %v, %v, %v", still, complete, err)
+	}
+}
+
+func TestReadOnlyFileIsReadableButNeverWritten(t *testing.T) {
+	v, dir := newTestVault(t, Options{ReadOnly: []string{"Meta/AGENTS.md"}})
+	const orig = "# Rules\nbe nice\n"
+	writeFile(t, dir, "Meta/AGENTS.md", orig)
+	writeFile(t, dir, "other.md", "o")
+	n, err := v.Read("Meta/AGENTS.md")
+	if err != nil || n.Content != orig {
+		t.Fatalf("Read = %v, %v", n, err)
+	}
+	ver := n.Version
+	for name, op := range map[string]func(p string) error{
+		"Create":            func(p string) error { _, err := v.Create(p, "x"); return err },
+		"Append":            func(p string) error { _, err := v.Append(p, "x"); return err },
+		"AppendToSection":   func(p string) error { _, err := v.AppendToSection(p, "Rules", "x"); return err },
+		"ReplaceSection":    func(p string) error { _, err := v.ReplaceSection(p, "Rules", "x", ver); return err },
+		"UpdateFrontmatter": func(p string) error { _, err := v.UpdateFrontmatter(p, map[string]any{"a": 1}, ver); return err },
+		"Delete":            func(p string) error { _, err := v.Delete(p); return err },
+		"MoveFrom":          func(p string) error { _, _, err := v.Move(p, "moved.md"); return err },
+		"MoveTo":            func(p string) error { _, _, err := v.Move("other.md", p); return err },
+	} {
+		for _, p := range []string{"Meta/AGENTS.md", "META/agents.MD", "./Meta//AGENTS.md"} {
+			err := op(p)
+			wantCode(t, err, CodePathProtected)
+			if !strings.Contains(err.Error(), "is the server instructions file") {
+				t.Errorf("%s(%q): message %q does not name the instructions file", name, p, err)
+			}
+		}
+	}
+	if readFile(t, dir, "Meta/AGENTS.md") != orig || !exists(dir, "other.md") {
+		t.Fatal("a refused write changed the vault")
+	}
+}
+
+func TestDenyAppliesInsideTrash(t *testing.T) {
+	v, dir := newTestVault(t, Options{Deny: []string{"Private"}})
+	writeFile(t, dir, ".trash/Private/x.md", "needle")
+	writeFile(t, dir, ".trash/private/y.md", "needle")
+	writeFile(t, dir, ".trash/Public/z.md", "needle")
+	for _, p := range []string{".trash/Private/x.md", ".TRASH/private/y.md"} {
+		_, err := v.Read(p)
+		wantCode(t, err, CodePathProtected)
+		_, _, err = v.Move(p, "restored.md")
+		wantCode(t, err, CodePathProtected)
+	}
+	_, err := v.List(".trash/Private", false)
+	wantCode(t, err, CodePathProtected)
+	for _, rec := range []bool{true, false} {
+		es, err := v.List(".trash", rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range listPaths(es) {
+			if strings.Contains(strings.ToLower(p), "private") {
+				t.Errorf("List(.trash, %v) exposed %s", rec, p)
+			}
+		}
+	}
+	hits, err := v.Search("needle", ".trash", 0)
+	if err != nil || len(hits) != 1 || hits[0].Path != ".trash/Public/z.md" {
+		t.Fatalf("Search .trash = %v, %v", hits, err)
+	}
+	if _, err := v.Read(".trash/Public/z.md"); err != nil {
+		t.Fatalf("an undenied trashed note must stay readable: %v", err)
+	}
+}
+
+func TestMoveRemoveFailureNeverLosesTheNote(t *testing.T) {
+	eio := &os.PathError{Op: "remove", Path: "src", Err: syscall.EIO}
+	cases := []struct {
+		name string
+		// during runs in place of removing the source after the link.
+		during           func(t *testing.T, dir string) error
+		wantErr          bool
+		wantSrc, wantDst string // "" means absent
+	}{
+		{
+			name: "source already gone: the move succeeded",
+			during: func(t *testing.T, dir string) error {
+				if err := os.Remove(filepath.Join(dir, "a.md")); err != nil {
+					t.Fatal(err)
+				}
+				return &os.PathError{Op: "remove", Path: "a.md", Err: fs.ErrNotExist}
+			},
+			wantDst: "A",
+		},
+		{
+			name:    "remove fails, same file: roll back",
+			during:  func(*testing.T, string) error { return eio },
+			wantErr: true, wantSrc: "A",
+		},
+		{
+			name: "remove fails, source rewritten meanwhile: keep both",
+			during: func(t *testing.T, dir string) error {
+				tmp := filepath.Join(dir, ".ext-tmp")
+				if err := os.WriteFile(tmp, []byte("NEW"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmp, filepath.Join(dir, "a.md")); err != nil {
+					t.Fatal(err)
+				}
+				return eio
+			},
+			wantErr: true, wantSrc: "NEW", wantDst: "A",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v, dir := newTestVault(t, Options{})
+			writeFile(t, dir, "a.md", "A")
+			v.remove = func(string) error { return c.during(t, dir) }
+			_, _, err := v.Move("a.md", "b.md")
+			if (err != nil) != c.wantErr {
+				t.Fatalf("Move err = %v, want error %v", err, c.wantErr)
+			}
+			for rel, want := range map[string]string{"a.md": c.wantSrc, "b.md": c.wantDst} {
+				if want == "" {
+					if exists(dir, rel) {
+						t.Errorf("%s exists, want absent", rel)
+					}
+				} else if !exists(dir, rel) || readFile(t, dir, rel) != want {
+					t.Errorf("%s missing or wrong, want %q", rel, want)
+				}
+			}
+		})
 	}
 }

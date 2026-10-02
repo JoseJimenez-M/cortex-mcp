@@ -256,9 +256,9 @@ func TestWritesCannotExceedReadLimit(t *testing.T) {
 	v.maxRead = 20
 	writeFile(t, dir, "a.md", "# A\nxxxxxxxx\n")
 	_, err := v.Append("a.md", strings.Repeat("y", 30))
-	wantCode(t, err, CodeTooLarge)
+	wantCode(t, err, CodeNoteTooLarge)
 	_, err = v.AppendToSection("a.md", "A", strings.Repeat("y", 30))
-	wantCode(t, err, CodeTooLarge)
+	wantCode(t, err, CodeNoteTooLarge)
 	if got := readFile(t, dir, "a.md"); got != "# A\nxxxxxxxx\n" {
 		t.Fatalf("file changed: %q", got)
 	}
@@ -266,5 +266,46 @@ func TestWritesCannotExceedReadLimit(t *testing.T) {
 	wantCode(t, err, CodeTooLarge)
 	if _, err := os.Stat(filepath.Join(dir, "b.md")); err == nil {
 		t.Fatal("b.md was created")
+	}
+}
+
+func TestWritesRefusedWhenDiskIsLow(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "a.md", "# A\nbody\n")
+	free := uint64(minFreeBytes - 1)
+	v.freeSpace = func() (uint64, error) { return free, nil }
+	n, err := v.Read("a.md")
+	if err != nil {
+		t.Fatalf("reads must work on a full disk: %v", err)
+	}
+	writes := map[string]func() error{
+		"Create":            func() error { _, err := v.Create("b.md", "x"); return err },
+		"Append":            func() error { _, err := v.Append("a.md", "x"); return err },
+		"AppendToSection":   func() error { _, err := v.AppendToSection("a.md", "A", "x"); return err },
+		"ReplaceSection":    func() error { _, err := v.ReplaceSection("a.md", "A", "x", n.Version); return err },
+		"UpdateFrontmatter": func() error { _, err := v.UpdateFrontmatter("a.md", map[string]any{"k": 1}, n.Version); return err },
+		"Move":              func() error { _, _, err := v.Move("a.md", "c.md"); return err },
+		"Delete":            func() error { _, err := v.Delete("a.md"); return err },
+	}
+	for name, w := range writes {
+		if err := w(); CodeOf(err) != CodeDiskLow {
+			t.Errorf("%s on a low disk: %v, want %s", name, err, CodeDiskLow)
+		}
+	}
+	if readFile(t, dir, "a.md") != "# A\nbody\n" || exists(dir, "b.md") || exists(dir, "c.md") {
+		t.Fatal("a refused write changed the vault")
+	}
+	// Validation still comes first: a bad path reports the path problem.
+	_, err = v.Create("../x.md", "x")
+	wantCode(t, err, CodePathOutside)
+
+	free = minFreeBytes
+	if _, err := v.Append("a.md", "x"); err != nil {
+		t.Fatalf("write at the floor: %v", err)
+	}
+	// A filesystem that cannot report free space is not refused.
+	v.freeSpace = func() (uint64, error) { return 0, errors.ErrUnsupported }
+	if _, err := v.Append("a.md", "y"); err != nil {
+		t.Fatalf("write with unknown free space: %v", err)
 	}
 }

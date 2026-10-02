@@ -160,6 +160,9 @@ func (v *Vault) Create(rel, content string) (string, error) {
 	if err := v.noSymlinks(p); err != nil {
 		return "", err
 	}
+	if err := v.checkDisk(); err != nil {
+		return "", err
+	}
 	defer v.locks.lock(p)()
 	if _, err := v.root.Lstat(filepath.FromSlash(p)); err == nil {
 		return "", errf(CodeExists, "%s already exists: use append or replace_section", p)
@@ -184,8 +187,11 @@ func (v *Vault) modify(rel, ver string, guarded bool, fn func(string) (string, e
 	if guarded && ver == "" {
 		return "", errf(CodeVersionRequired, "pass the version from your last read_note")
 	}
+	if err := v.checkDisk(); err != nil {
+		return "", err
+	}
 	defer v.locks.lock(p)()
-	n, err := v.read(p)
+	n, err := v.readContent(p)
 	if err != nil {
 		return "", err
 	}
@@ -198,7 +204,7 @@ func (v *Vault) modify(rel, ver string, guarded bool, fn func(string) (string, e
 	}
 	// Repeated appends must never grow a note past what read accepts.
 	if int64(len(out)) > v.maxRead {
-		return "", errf(CodeTooLarge, "%s would grow past %d bytes", p, v.maxRead)
+		return "", errf(CodeNoteTooLarge, "%s would grow past %d bytes", p, v.maxRead)
 	}
 	data := []byte(out)
 	if err := v.writeAtomic(p, data); err != nil {

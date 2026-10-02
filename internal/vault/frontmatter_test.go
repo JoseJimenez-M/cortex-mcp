@@ -2,6 +2,7 @@ package vault
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -307,4 +308,75 @@ func TestSetFrontmatterEncodesJSONShapedValues(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", c.name, out, want)
 		}
 	}
+}
+
+// hugeFlowNote is a note whose frontmatter is a 1 MiB flow sequence: cheap
+// to store, expensive to decode, and well past maxFrontmatterBytes.
+func hugeFlowNote() string {
+	return "---\ntags: [" + strings.Repeat("a, ", 350_000) + "a]\n---\nbody with #inline and needle\n"
+}
+
+func TestParseFrontmatterCapsBlockSize(t *testing.T) {
+	_, err := parseFrontmatter(hugeFlowNote())
+	if got, want := fmt.Sprint(err), "frontmatter_invalid: frontmatter block larger than 65536 bytes"; got != want {
+		t.Fatalf("err = %q, want %q", got, want)
+	}
+	atCap := "---\nk: " + strings.Repeat("x", maxFrontmatterBytes-len("k: \n")) + "\n---\n"
+	if fm, err := parseFrontmatter(atCap); err != nil || fm["k"] == nil {
+		t.Fatalf("a block of exactly %d bytes must parse: %v", maxFrontmatterBytes, err)
+	}
+}
+
+func TestReadOversizedFrontmatterKeepsNoteReadable(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "big.md", hugeFlowNote())
+	n, err := v.Read("big.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Content != hugeFlowNote() || n.Frontmatter != nil {
+		t.Fatal("content or frontmatter wrong")
+	}
+	if n.FrontmatterError != "frontmatter_invalid: frontmatter block larger than 65536 bytes" {
+		t.Fatalf("FrontmatterError = %q", n.FrontmatterError)
+	}
+}
+
+func TestScansParseFrontmatterOnlyForTags(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "big.md", hugeFlowNote())
+	writeFile(t, dir, "other.md", "---\ntags: [x]\n---\nlinks [[big]]\n")
+	calls := 0
+	parse := v.parseFM
+	v.parseFM = func(c string) (map[string]any, error) { calls++; return parse(c) }
+
+	hits, err := v.Search("needle", "", 0)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("Search = %v, %v", hits, err)
+	}
+	links, err := v.Backlinks("big.md")
+	if err != nil || len(links) != 1 {
+		t.Fatalf("Backlinks = %v, %v", links, err)
+	}
+	if calls != 0 {
+		t.Fatalf("Search and Backlinks parsed frontmatter %d times, want 0", calls)
+	}
+	tagged, err := v.SearchTag("inline")
+	if err != nil || len(tagged) != 1 || tagged[0] != "big.md" {
+		t.Fatalf("SearchTag(inline) = %v, %v", tagged, err)
+	}
+	tagged, err = v.SearchTag("x")
+	if err != nil || len(tagged) != 1 || tagged[0] != "other.md" {
+		t.Fatalf("SearchTag(x) = %v, %v", tagged, err)
+	}
+	if calls == 0 {
+		t.Fatal("SearchTag must parse frontmatter")
+	}
+}
+
+func TestSetFrontmatterRefusesBlockOverCap(t *testing.T) {
+	_, err := setFrontmatter("---\na: 1\n---\nbody\n", map[string]any{"big": strings.Repeat("x", maxFrontmatterBytes)})
+	wantCode(t, err, CodeBadFrontmatter)
+	_, err = setFrontmatter(hugeFlowNote(), map[string]any{"a": 1})
+	wantCode(t, err, CodeBadFrontmatter)
 }

@@ -35,6 +35,11 @@ const (
 // This is the first line of defence and gives clear error codes; os.Root
 // is the second and also catches symlinks.
 func (v *Vault) clean(rel string, a access, wantMD bool) (string, error) {
+	// Length first: everything after it (and every error message) is linear
+	// in the input, and no real note path comes near these limits.
+	if err := checkLength(rel); err != nil {
+		return "", err
+	}
 	if err := checkChars(rel); err != nil {
 		return "", err
 	}
@@ -92,7 +97,8 @@ func (v *Vault) noSymlinks(p string) error {
 
 // protectedErr is the single definition of which cleaned, slash-separated
 // paths are off limits: neverAccessible names at any depth, the top-level
-// trash for writes, and the operator's deny list. Everything folds case with
+// trash for writes, the operator's deny list (also below the trash), and the
+// read-only files for writes and moves. Everything folds case with
 // fold (unicode simple folding), segment by segment, so all rules agree on what "the same
 // name" means. Any later folder walk (listing, search) MUST call this same
 // helper on each entry so it cannot expose what clean refuses.
@@ -108,9 +114,23 @@ func (v *Vault) protectedErr(p string, a access) error {
 	if a == accessWrite && foldEq(segs[0], trashDir) {
 		return errf(CodePathProtected, ".trash is receive-only: use delete_note to trash a note and move_note to restore it")
 	}
+	// Delete keeps the folder path inside the trash, so a denied note that
+	// was trashed by hand (or before the entry was added) lives at
+	// .trash/<denied path>: match the deny list there too. Obsidian's own
+	// trash flattens paths, which no rule can match; see the README.
+	inTrash := len(segs) > 1 && foldEq(segs[0], trashDir)
 	for _, d := range v.deny {
-		if hasFoldPrefix(segs, strings.Split(d, "/")) {
+		ds := strings.Split(d, "/")
+		if hasFoldPrefix(segs, ds) || (inTrash && hasFoldPrefix(segs[1:], ds)) {
 			return errf(CodePathProtected, "%s is protected by the server configuration", d)
+		}
+	}
+	if a != accessRead {
+		for _, ro := range v.readOnly {
+			rs := strings.Split(ro, "/")
+			if len(rs) == len(segs) && hasFoldPrefix(segs, rs) {
+				return errf(CodePathProtected, "%s is the server instructions file: tools may read it but not change, move, or delete it", ro)
+			}
 		}
 	}
 	return nil
@@ -129,12 +149,36 @@ func hasFoldPrefix(segs, prefix []string) bool {
 	return true
 }
 
+// Path length caps, in bytes. 255 is NAME_MAX on Linux and macOS and 1024
+// is below every PATH_MAX in use, so a longer path could never be created
+// anyway; refusing early keeps a hostile megabyte-long path from costing
+// work in the protection checks or being echoed back in messages.
+const (
+	maxPathBytes    = 1024
+	maxSegmentBytes = 255
+)
+
+// checkLength enforces maxPathBytes and maxSegmentBytes. Messages do not
+// echo the path: it may be huge.
+func checkLength(rel string) error {
+	if len(rel) > maxPathBytes {
+		return errf(CodeInvalidPath, "paths may be at most %d bytes", maxPathBytes)
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if len(seg) > maxSegmentBytes {
+			return errf(CodeInvalidPath, "path segments may be at most %d bytes", maxSegmentBytes)
+		}
+	}
+	return nil
+}
+
 // checkChars rejects input that is ambiguous across platforms or unsafe to
 // echo: invalid UTF-8, control and Unicode format characters (NUL, bidi
 // overrides, zero-width and BOM), backslash (a separator on Windows), and
 // leading or trailing whitespace on the whole string and on every segment.
 // Whitespace is rejected, not trimmed, so the path that is checked is the
-// path that is used.
+// path that is used. config.checkChars (internal/config/config.go) mirrors
+// this rule for config values; config_vault_test.go keeps the two in sync.
 func checkChars(rel string) error {
 	if !utf8.ValidString(rel) {
 		return errf(CodeInvalidPath, "paths must be valid UTF-8")

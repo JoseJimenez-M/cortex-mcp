@@ -101,7 +101,7 @@ func TestReadRejectsOversizeNote(t *testing.T) {
 	v.maxRead = 10
 	writeFile(t, dir, "big.md", "12345678901")
 	_, err := v.Read("big.md")
-	wantCode(t, err, CodeTooLarge)
+	wantCode(t, err, CodeNoteTooLarge)
 	writeFile(t, dir, "ok.md", "1234567890")
 	if _, err := v.Read("ok.md"); err != nil {
 		t.Fatalf("note at the limit must be readable: %v", err)

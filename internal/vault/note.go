@@ -35,8 +35,26 @@ func (v *Vault) Read(rel string) (*Note, error) {
 	return v.read(p)
 }
 
-// read loads a path already validated by clean.
+// read loads a path already validated by clean, frontmatter included.
 func (v *Vault) read(p string) (*Note, error) {
+	n, err := v.readContent(p)
+	if err != nil {
+		return nil, err
+	}
+	if fm, err := v.parseFM(n.Content); err != nil {
+		// A broken frontmatter must not hide the note: the assistant may be
+		// the one asked to repair it.
+		n.FrontmatterError = err.Error()
+	} else {
+		n.Frontmatter = fm
+	}
+	return n, nil
+}
+
+// readContent is read without the frontmatter parse, for callers that only
+// need the text (text search, backlinks, read-modify-write). Decoding YAML
+// for every note of a scan would cost far more than the scan itself.
+func (v *Vault) readContent(p string) (*Note, error) {
 	if err := v.noSymlinks(p); err != nil {
 		return nil, err
 	}
@@ -68,17 +86,9 @@ func (v *Vault) read(p string) (*Note, error) {
 		return nil, fsErr(err, p)
 	}
 	if int64(len(b)) > v.maxRead {
-		return nil, errf(CodeTooLarge, "%s is larger than %d bytes", p, v.maxRead)
+		return nil, errf(CodeNoteTooLarge, "%s is larger than %d bytes", p, v.maxRead)
 	}
-	n := &Note{Path: p, Content: string(b), Version: version(b), Modified: info.ModTime().UTC()}
-	if fm, err := parseFrontmatter(n.Content); err != nil {
-		// A broken frontmatter must not hide the note: the assistant may be
-		// the one asked to repair it.
-		n.FrontmatterError = err.Error()
-	} else {
-		n.Frontmatter = fm
-	}
-	return n, nil
+	return &Note{Path: p, Content: string(b), Version: version(b), Modified: info.ModTime().UTC()}, nil
 }
 
 // maxNoteBytes bounds the memory one Read can allocate. The server is

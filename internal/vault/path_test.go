@@ -204,3 +204,35 @@ func TestFsErrMapsRootSymlinkEscape(t *testing.T) {
 	}
 	wantCode(t, fsErr(err, "link.md"), CodePathOutside)
 }
+
+func TestCleanCapsPathLength(t *testing.T) {
+	v, _ := newTestVault(t, Options{})
+	seg255 := strings.Repeat("a", 252) + ".md"
+	long := strings.Repeat("d/", 510) + "x.md" // exactly 1024 bytes
+	for _, ok := range []string{seg255, long} {
+		if _, err := v.clean(ok, accessRead, true); err != nil {
+			t.Errorf("clean(len %d): %v, want accepted", len(ok), err)
+		}
+	}
+	for _, bad := range []string{
+		strings.Repeat("a", 253) + ".md",     // one segment of 256 bytes
+		strings.Repeat("d/", 511) + "x.md",   // 1026 bytes
+		strings.Repeat("a/", 1<<19) + "x.md", // about 1 MiB
+		strings.Repeat("é", 127) + "ab.md",   // 259 bytes in 132 runes
+	} {
+		_, err := v.clean(bad, accessRead, true)
+		wantCode(t, err, CodeInvalidPath)
+	}
+}
+
+func TestHugePathRejectedBeforeAnyLock(t *testing.T) {
+	v, _ := newTestVault(t, Options{})
+	huge := strings.Repeat("a/", 1<<19) + "x.md"
+	_, err := v.Append(huge, "x")
+	wantCode(t, err, CodeInvalidPath)
+	_, err = v.Create(huge, "x")
+	wantCode(t, err, CodeInvalidPath)
+	if n := v.locks.size(); n != 0 {
+		t.Fatalf("lock map holds %d entries after rejected calls", n)
+	}
+}

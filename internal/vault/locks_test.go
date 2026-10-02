@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -122,4 +123,43 @@ func TestFoldMatchesEqualFold(t *testing.T) {
 			t.Errorf("fold(%q)==fold(%q) = %v, EqualFold = %v", c[0], c[1], got, want)
 		}
 	}
+}
+
+func TestLockMapIsEmptyAfterFailedCalls(t *testing.T) {
+	v, _ := newTestVault(t, Options{})
+	for i := 0; i < 500; i++ {
+		_, err := v.Append(fmt.Sprintf("missing-%d.md", i), "x")
+		wantCode(t, err, CodeNotFound)
+	}
+	if n := v.locks.size(); n != 0 {
+		t.Fatalf("lock map holds %d entries after failed calls", n)
+	}
+}
+
+func TestLockEntriesSurviveWhileShared(t *testing.T) {
+	var l lockMap
+	unlock := l.lock("a.md")
+	got := make(chan struct{})
+	go func() {
+		u := l.lock("A.md")
+		close(got)
+		u()
+	}()
+	time.Sleep(20 * time.Millisecond)
+	unlock()
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("waiter never acquired")
+	}
+	if n := l.size(); n != 0 {
+		t.Fatalf("lock map holds %d entries after every holder unlocked", n)
+	}
+}
+
+// size reports how many keys the map holds.
+func (l *lockMap) size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.m)
 }

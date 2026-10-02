@@ -65,7 +65,7 @@ func (v *Vault) visible(p, folder string) bool {
 }
 
 func isNote(name string) bool {
-	return strings.EqualFold(path.Ext(name), ".md") && !strings.HasPrefix(name, ".cortex-tmp-")
+	return foldEq(path.Ext(name), ".md") && !strings.HasPrefix(name, ".cortex-tmp-")
 }
 
 // noteInfo returns the metadata of a listed or walked entry when it is a
@@ -116,8 +116,13 @@ func (v *Vault) walk(folder string, fn func(p string, info fs.FileInfo) error) e
 
 // readForScan reads a note during a walk. Notes that cannot be read for a
 // vault reason (a symlink) or a permission reason (mode 000) are skipped, not fatal.
-func (v *Vault) readForScan(p string) (*Note, bool, error) {
-	n, err := v.read(p)
+// Frontmatter is parsed only when withFM is set: only the tag scan needs it.
+func (v *Vault) readForScan(p string, withFM bool) (*Note, bool, error) {
+	read := v.readContent
+	if withFM {
+		read = v.read
+	}
+	n, err := read(p)
 	if err != nil {
 		if CodeOf(err) != "" || errors.Is(err, fs.ErrPermission) {
 			return nil, false, nil
@@ -181,20 +186,28 @@ func (v *Vault) List(folder string, recursive bool) ([]Entry, error) {
 	return out, nil
 }
 
+// Search limits: the number of hits when none is asked for, and the most a
+// caller may ask for.
+const (
+	DefaultSearchLimit = 20
+	MaxSearchLimit     = 100
+)
+
 // Search finds lines containing query (case-insensitive substring, using
 // strings.ToLower, which is simple lowercasing: good for accents and
 // Cyrillic, not full Unicode case folding). Lines are split on "\n" and
 // the snippet is trimmed, so CRLF notes yield no trailing "\r". Hits come in
-// lexical path order. limit defaults to 20 and is capped at 100.
+// lexical path order. limit defaults to DefaultSearchLimit and is capped at
+// MaxSearchLimit.
 func (v *Vault) Search(query, folder string, limit int) ([]Hit, error) {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
 		return nil, errf(CodeInvalidInput, "query is empty")
 	}
 	if limit <= 0 {
-		limit = 20
+		limit = DefaultSearchLimit
 	}
-	limit = min(limit, 100)
+	limit = min(limit, MaxSearchLimit)
 	f, err := v.clean(folder, accessRead, false)
 	if err != nil {
 		return nil, err
@@ -204,7 +217,7 @@ func (v *Vault) Search(query, folder string, limit int) ([]Hit, error) {
 	}
 	var hits []Hit
 	err = v.walk(f, func(p string, _ fs.FileInfo) error {
-		n, ok, err := v.readForScan(p)
+		n, ok, err := v.readForScan(p, false)
 		if !ok {
 			return err
 		}
@@ -263,7 +276,7 @@ func (v *Vault) SearchTag(tag string) ([]string, error) {
 	}
 	var out []string
 	err := v.walk(".", func(p string, _ fs.FileInfo) error {
-		n, ok, err := v.readForScan(p)
+		n, ok, err := v.readForScan(p, true)
 		if !ok {
 			return err
 		}
@@ -332,7 +345,7 @@ func (v *Vault) Backlinks(rel string) ([]string, error) {
 		if p == target {
 			return nil
 		}
-		n, ok, err := v.readForScan(p)
+		n, ok, err := v.readForScan(p, false)
 		if !ok {
 			return err
 		}
