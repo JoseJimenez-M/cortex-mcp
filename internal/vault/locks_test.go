@@ -139,18 +139,20 @@ func TestLockMapIsEmptyAfterFailedCalls(t *testing.T) {
 func TestLockEntriesSurviveWhileShared(t *testing.T) {
 	var l lockMap
 	unlock := l.lock("a.md")
-	got := make(chan struct{})
+	// released closes only after the waiter has unlocked: closing it on
+	// acquisition raced with the size check below.
+	released := make(chan struct{})
 	go func() {
 		u := l.lock("A.md")
-		close(got)
 		u()
+		close(released)
 	}()
 	time.Sleep(20 * time.Millisecond)
 	unlock()
 	select {
-	case <-got:
+	case <-released:
 	case <-time.After(time.Second):
-		t.Fatal("waiter never acquired")
+		t.Fatal("waiter never acquired and released")
 	}
 	if n := l.size(); n != 0 {
 		t.Fatalf("lock map holds %d entries after every holder unlocked", n)
