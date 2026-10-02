@@ -266,7 +266,7 @@ behaviour. Not built in v1 unless a real client needs it.
 
 ## 13. Licence
 
-Proposed: **PolyForm Noncommercial 1.0.0**, with a notice that commercial use (companies, resale,
+Decided: **PolyForm Noncommercial 1.0.0**, with a notice that commercial use (companies, resale,
 including modified versions) requires a separate licence negotiated with the author. Chosen over CC
 BY-NC because Creative Commons advises against its licences for software. This makes the project
 source-available rather than OSI open source; the README states that plainly. If outside contributions
