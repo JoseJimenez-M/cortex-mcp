@@ -18,7 +18,8 @@ func write(t *testing.T, body string) string {
 
 // abs builds an absolute path valid on the host OS.
 func abs(parts ...string) string {
-	return filepath.Join(append([]string{string(filepath.Separator)}, parts...)...)
+	root := filepath.VolumeName(os.TempDir()) + string(filepath.Separator)
+	return filepath.Join(append([]string{root}, parts...)...)
 }
 
 func valid() Config {
@@ -42,8 +43,13 @@ func TestLoadAppliesDefaults(t *testing.T) {
 }
 
 func TestLoadMissingFile(t *testing.T) {
-	if _, err := Load(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
-		t.Fatal("expected error")
+	p := filepath.Join(t.TempDir(), "nope.yaml")
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "config "+p) {
+		t.Fatalf("err = %v", err)
+	}
+	p = filepath.Join(t.TempDir(), "no-such-dir", "c.yaml")
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "config "+p) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -154,6 +160,22 @@ func TestValidateErrors(t *testing.T) {
 		"listen named port":      {func(c *Config) { c.Listen = ":http" }, "listen:"},
 		"instructions traversal": {func(c *Config) { c.InstructionsFile = "../x.md" }, "instructions_file:"},
 		"instructions not md":    {func(c *Config) { c.InstructionsFile = "x.txt" }, "instructions_file:"},
+		"instr control":          {func(c *Config) { c.InstructionsFile = "a\x01.md" }, "instructions_file:"},
+		"instr format":           {func(c *Config) { c.InstructionsFile = "a\u200b.md" }, "instructions_file:"},
+		"instr backslash":        {func(c *Config) { c.InstructionsFile = `a\b.md` }, "instructions_file:"},
+		"instr bad utf8":         {func(c *Config) { c.InstructionsFile = "a\xff.md" }, "instructions_file:"},
+		"instr seg space":        {func(c *Config) { c.InstructionsFile = "a /b.md" }, "instructions_file:"},
+		"listen plus":            {func(c *Config) { c.Listen = ":+8080" }, "listen:"},
+		"listen leading zero":    {func(c *Config) { c.Listen = ":08080" }, "listen:"},
+		"url empty port":         {func(c *Config) { c.PublicURL = "https://mcp.example.com:" }, "public_url:"},
+		"url plus port":          {func(c *Config) { c.PublicURL = "https://mcp.example.com:+443" }, "public_url:"},
+		"url zero port":          {func(c *Config) { c.PublicURL = "https://mcp.example.com:0443" }, "public_url:"},
+		"deny bad utf8":          {func(c *Config) { c.Deny = []string{"a\xffb"} }, "deny[0]"},
+		"deny format char":       {func(c *Config) { c.Deny = []string{"a\u202eb"} }, "deny[0]"},
+		"deny segment space":     {func(c *Config) { c.Deny = []string{"a /b"} }, "deny[0]"},
+		"deny dot":               {func(c *Config) { c.Deny = []string{"."} }, "deny[0]"},
+		"deny dot slash":         {func(c *Config) { c.Deny = []string{"./"} }, "deny[0]"},
+		"deny slash":             {func(c *Config) { c.Deny = []string{"/"} }, "deny[0]"},
 		"deny absolute":          {func(c *Config) { c.Deny = []string{abs("etc")} }, "deny[0]"},
 		"deny dotdot":            {func(c *Config) { c.Deny = []string{"ok", "a/../b"} }, "deny[1]"},
 		"deny backslash":         {func(c *Config) { c.Deny = []string{`a\b`} }, "deny[0]"},

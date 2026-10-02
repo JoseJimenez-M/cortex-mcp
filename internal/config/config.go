@@ -13,11 +13,13 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -90,17 +92,17 @@ func Load(path string) (Config, error) {
 func readFile(path string) ([]byte, error) {
 	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	defer root.Close()
 	f, err := root.Open(filepath.Base(path))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	defer f.Close()
 	raw, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	if len(raw) > maxConfigBytes {
 		return nil, fmt.Errorf("config %s: larger than %d bytes", path, maxConfigBytes)
@@ -169,8 +171,12 @@ func (c Config) Validate() error {
 	if msg := checkListen(c.Listen); msg != "" {
 		add("listen: %s", msg)
 	}
-	if c.InstructionsFile != "" && (!filepath.IsLocal(c.InstructionsFile) || !strings.EqualFold(filepath.Ext(c.InstructionsFile), ".md")) {
-		add("instructions_file: must be a .md file inside the vault")
+	if c.InstructionsFile != "" {
+		if !filepath.IsLocal(c.InstructionsFile) || !strings.EqualFold(filepath.Ext(c.InstructionsFile), ".md") {
+			add("instructions_file: must be a .md file inside the vault")
+		} else if msg := checkChars(c.InstructionsFile); msg != "" {
+			add("instructions_file: %s", msg)
+		}
 	}
 	for i, d := range c.Deny {
 		if msg := checkDeny(d); msg != "" {
@@ -214,6 +220,12 @@ func checkPublicURL(raw string) string {
 	if u.Scheme != "https" && !(u.Scheme == "http" && isLocalHost(u.Hostname())) {
 		return hint
 	}
+	if strings.HasSuffix(u.Host, ":") {
+		return "has an empty port after the colon"
+	}
+	if p := u.Port(); p != "" && !validPort(p) {
+		return "port must be a plain number from 1 to 65535"
+	}
 	if u.User != nil {
 		return "must not contain credentials (they would end up in logs)"
 	}
@@ -228,30 +240,75 @@ func checkListen(addr string) string {
 	if err != nil {
 		return "must be host:port such as :8080"
 	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 {
-		return "port must be a number from 1 to 65535"
+	if !validPort(port) {
+		return "port must be a plain number from 1 to 65535"
 	}
 	return ""
 }
 
+// validPort accepts only digits without a sign or leading zeros, so the
+// value read is the value bound.
+func validPort(p string) bool {
+	if p == "" || p[0] == '0' {
+		return false
+	}
+	for _, r := range p {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	n, err := strconv.Atoi(p)
+	return err == nil && n <= 65535
+}
+
+// checkChars mirrors vault.checkChars (internal/vault/path.go); config is a
+// leaf and cannot import it. config_vault_test.go runs a shared table through
+// both so they cannot drift. Keep the two in sync.
+func checkChars(s string) string {
+	if !utf8.ValidString(s) {
+		return "must be valid UTF-8"
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return "must not contain control or format characters"
+		}
+		if r == '\\' {
+			return "must not contain a backslash"
+		}
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "" {
+			continue
+		}
+		first, _ := utf8.DecodeRuneInString(seg)
+		last, _ := utf8.DecodeLastRuneInString(seg)
+		if unicode.IsSpace(first) || unicode.IsSpace(last) {
+			return "path segments must not start or end with whitespace"
+		}
+	}
+	return ""
+}
+
+// checkDeny is stricter than vault.New on purpose: the vault normalizes
+// "a/../b" to "b" and skips entries that clean to nothing, which would
+// silently protect a different path than the operator wrote.
 func checkDeny(d string) string {
-	switch {
-	case d == "":
+	if d == "" {
 		return "must not be empty"
-	case d != strings.TrimSpace(d):
-		return "must not have leading or trailing whitespace"
-	case filepath.IsAbs(d) || strings.HasPrefix(d, "/"):
+	}
+	if msg := checkChars(d); msg != "" {
+		return msg
+	}
+	if filepath.IsAbs(d) || strings.HasPrefix(d, "/") {
 		return "must be relative to the vault"
-	case strings.Contains(d, `\`):
-		return "must not contain a backslash"
-	case strings.IndexFunc(d, unicode.IsControl) >= 0:
-		return "must not contain control characters"
 	}
 	for _, seg := range strings.Split(d, "/") {
 		if seg == ".." {
 			return `must not contain ".."`
 		}
+	}
+	if c := path.Clean(d); c == "." || c == "" {
+		return "refers to the vault root and would match nothing"
 	}
 	return ""
 }
