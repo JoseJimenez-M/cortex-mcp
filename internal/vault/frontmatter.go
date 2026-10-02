@@ -221,16 +221,19 @@ func setFrontmatter(content string, fields map[string]any) (string, error) {
 	if err := enc.Close(); err != nil {
 		return "", errf(CodeBadFrontmatter, "cannot encode frontmatter: %v", err)
 	}
-	// Removing or replacing an anchored value that an alias still uses
-	// yields text that no longer parses: refuse rather than corrupt the note.
-	if _, err := decodeFrontmatterNode(buf.String()); err != nil {
-		return "", errf(CodeBadFrontmatter, "the update would leave the frontmatter invalid (a removed or replaced anchor is still referenced?)")
-	}
 	block := buf.String()
 	if eol != "\n" {
 		block = strings.ReplaceAll(block, "\n", eol)
 	}
-	return bom + "---" + eol + block + "---" + eol + body, nil
+	out := bom + "---" + eol + block + "---" + eol + body
+	// read_note must be able to read what we write. Validating with the
+	// reader's own parser also refuses what a merge can break or never
+	// fixed: duplicate keys, complex keys, an anchor removed while an alias
+	// still uses it.
+	if _, err := parseFrontmatter(out); err != nil {
+		return "", errf(CodeBadFrontmatter, "the update would leave frontmatter that cannot be read: %v", err)
+	}
+	return out, nil
 }
 
 // UpdateFrontmatter merges fields into a note's frontmatter without

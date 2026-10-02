@@ -266,3 +266,45 @@ func TestUpdateFrontmatterOnVault(t *testing.T) {
 	_, err = v.UpdateFrontmatter("a.md", map[string]any{"status": "x"}, n.Version)
 	wantCode(t, err, CodeChanged)
 }
+
+func TestSetFrontmatterRefusesWhatReadNoteCannotParse(t *testing.T) {
+	for _, in := range []string{
+		"---\na: 1\na: 2\n---\nx",
+		"---\n? [a]\n: 1\n---\nx",
+	} {
+		_, err := setFrontmatter(in, map[string]any{"b": 1})
+		wantCode(t, err, CodeBadFrontmatter)
+
+		v, dir := newTestVault(t, Options{})
+		writeFile(t, dir, "a.md", in)
+		n, _ := v.Read("a.md")
+		_, err = v.UpdateFrontmatter("a.md", map[string]any{"b": 1}, n.Version)
+		wantCode(t, err, CodeBadFrontmatter)
+		if got := readFile(t, dir, "a.md"); got != in {
+			t.Fatalf("note changed: %q", got)
+		}
+	}
+}
+
+func TestSetFrontmatterEncodesJSONShapedValues(t *testing.T) {
+	cases := []struct {
+		name string
+		val  any
+		want string
+	}{
+		{"whole float", float64(3), "v: 3\n"},
+		{"fraction", 0.1, "v: 0.1\n"},
+		{"large", 1e21, "v: 1e+21\n"},
+		{"nested null", map[string]any{"k": nil, "j": 1}, "v:\n  j: 1\n  k: null\n"},
+		{"mixed list", []any{"a", float64(1), true, nil, "2026-10-02"}, "v:\n  - a\n  - 1\n  - true\n  - null\n  - \"2026-10-02\"\n"},
+	}
+	for _, c := range cases {
+		out, err := setFrontmatter("", map[string]any{"v": c.val})
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if want := "---\n" + c.want + "---\n"; out != want {
+			t.Errorf("%s: got %q, want %q", c.name, out, want)
+		}
+	}
+}
