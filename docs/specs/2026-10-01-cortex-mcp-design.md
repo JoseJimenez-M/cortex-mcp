@@ -12,7 +12,10 @@ tags: [kind/repo, topic/dev]
 vault or any folder of `.md` files) over the Model Context Protocol (MCP). The vault is the durable
 "brain"; the AI behind it is replaceable.*
 
-Status: design approved in conversation, not built. Nothing in this document is implemented yet.
+Status: design approved. Plan 1 (core server: vault, tools, Bearer auth, rate limit, write log, `serve`
+and `token` commands) is implemented on branch `plan-1-core-server`. OAuth 2.1, `setup`, `reset-auth`,
+`clients`, and the release tooling are not built; sections 6.1, 6.2, 6.4, and 10 (releases, docs) describe
+planned work.
 
 ![Architecture](../diagrams/cortex-mcp-architecture.svg)
 
@@ -184,9 +187,10 @@ tokens. Revoking one never affects the others.
 
 ### 6.5 State
 Auth state (`auth.db`, SQLite, a few KB) and the write log live in `state_dir`, which is **outside
-the vault** by default. Keeping secrets out of the vault means no sync tool or git backup can copy
+the vault**: config validation refuses a `state_dir` that is the vault or inside it, and on Unix a shared
+directory (sticky or world-writable, such as `/tmp`). Keeping secrets out of the vault means no sync tool or git backup can copy
 them by accident, whatever the operator's setup. `.cortex-mcp/` stays on the fixed protected list
-anyway, in case an operator points `state_dir` inside the vault.
+as defence in depth.
 
 ## 7. Configuration
 
@@ -194,11 +198,12 @@ One YAML file, every field documented, sensible defaults:
 
 ```yaml
 vault: /data/vault
-state_dir: /data/state              # auth.db and logs; keep outside the vault
+state_dir: /data/state              # auth.db and logs; must not be inside the vault
 public_url: https://mcp.example.com
+listen: ":8080"                     # address to bind
 instructions_file: AGENTS.md        # vault-relative, optional
 deny: []                            # extra protected paths
-bearer_tokens: true                 # false = OAuth only
+bearer_tokens: true                 # false = OAuth only (refused until OAuth exists)
 limits:
   max_write_bytes: 1048576
   requests_per_minute: 60
@@ -207,7 +212,8 @@ logs:
   keep: 3
 ```
 
-Invalid config fails fast at startup with a clear message. No config value is ever secret: secrets
+Invalid config fails fast at startup with a clear message; numeric limits have upper caps (write size 8 MiB,
+6000 requests per minute, log size 1024 MB, 100 kept files). No config value is ever secret: secrets
 live only in the auth state.
 
 ## 8. Logs
@@ -233,7 +239,8 @@ refactor. No production code without a test that required it.
   symlink and `..` attacks), atomic write, section parsing, frontmatter merge, version conflicts,
   trash, backlinks. Table-driven tests for parsers. Fuzz tests (`go test -fuzz`) for path resolution,
   section parsing, and frontmatter parsing, since those take untrusted input.
-- **`tools/`**: tests with a fake `vault` interface: input validation and error mapping.
+- **`tools/`**: tests against a real vault in a temporary directory, over the SDK's in-memory transport:
+  input validation and error mapping.
 - **`auth/`**: unit tests for token issuance, expiry, rotation, revocation, PKCE validation; WebAuthn
   and TOTP verified with library test vectors.
 - **Integration**: start the real server in-process, connect with the MCP Go SDK client, exercise the

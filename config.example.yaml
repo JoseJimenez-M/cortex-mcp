@@ -1,0 +1,43 @@
+# cortex-mcp configuration. Unknown keys are rejected at startup.
+# Required: vault, state_dir, public_url. Everything else has the default shown.
+
+# The Markdown folder to serve. Absolute path.
+vault: /data/vault
+
+# Where auth.db (hashed Bearer tokens) and writes.log live. Absolute path.
+# Must NOT be the vault or inside it, so secrets never sync with the notes.
+# On Linux and macOS it must also not be a shared directory (sticky or
+# world-writable, like /tmp): use a dedicated one.
+state_dir: /data/state
+
+# The URL clients use to reach the server. https, host (and optional port)
+# only: no path, query, fragment, or credentials. http is accepted only for
+# localhost, 127.0.0.1, and ::1.
+public_url: https://mcp.example.com
+
+# Address to bind, host:port. Default ":8080". Bind 127.0.0.1:PORT when a
+# reverse proxy on the same host terminates TLS.
+listen: ":8080"
+
+# Optional. A .md file inside the vault (vault-relative) whose content is
+# sent to every assistant as the MCP server instructions on connect. It is
+# re-read at most every 5 seconds, so edits reach new sessions without a restart.
+instructions_file: AGENTS.md
+
+# Extra vault-relative files or folders no tool may read or write.
+# Entries must be non-empty, relative, free of ".." and control characters,
+# and not the vault root. .git, .obsidian, and .cortex-mcp are always
+# protected (at any depth), and .trash is receive-only; none of that is configurable.
+deny: []
+
+# Must stay true until OAuth is implemented: false is refused at startup
+# because no client could authenticate.
+bearer_tokens: true
+
+limits:
+  max_write_bytes: 1048576    # per write, 1 to 8388608 (8 MiB, the largest note the vault reads)
+  requests_per_minute: 60     # per client, 1 to 6000
+
+logs:                         # rotation of state_dir/writes.log
+  max_size_mb: 5              # 1 to 1024
+  keep: 3                     # rotated files kept, 1 to 100
