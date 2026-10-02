@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1200 912" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="cortex-mcp-architecture-title cortex-mcp-architecture-desc">
+      <title id="cortex-mcp-architecture-title">cortex-mcp architecture</title>
+      <desc id="cortex-mcp-architecture-desc">Several AI clients reach a self-hosted cortex-mcp server through Caddy over HTTPS; the server's layered modules read and write a Markdown vault folder that Syncthing mirrors to a laptop running Obsidian and a weekly timer commits and pushes to GitHub.</desc>
+      <defs>
+        <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+      <!-- ============ ZONES ============ -->
+      <!-- Clients (internet) -->
+      <rect x="24" y="68" width="232" height="288" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <rect x="36" y="72" width="164" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="40" y="81" fill="rgba(45,49,66,0.50)" font-size="7" font-family="'Geist Mono', monospace" letter-spacing="0.14em">CLIENTS · OVER THE INTERNET</text>
+
+      <!-- Your deployment (VPS) -->
+      <rect x="320" y="64" width="856" height="656" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.30)" stroke-width="1" stroke-dasharray="6,4"/>
+      <rect x="332" y="68" width="140" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="336" y="77" fill="rgba(45,49,66,0.60)" font-size="7" font-family="'Geist Mono', monospace" letter-spacing="0.14em">YOUR DEPLOYMENT · VPS</text>
+
+      <!-- Open-source repo: cortex-mcp process -->
+      <rect x="616" y="120" width="544" height="448" rx="8" fill="#f5f5f5"/>
+      <rect x="616" y="120" width="544" height="448" rx="8" fill="rgba(45,49,66,0.04)" stroke="rgba(45,49,66,0.60)" stroke-width="1"/>
+      <rect x="628" y="124" width="112" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="632" y="133" fill="rgba(45,49,66,0.60)" font-size="7" font-family="'Geist Mono', monospace" letter-spacing="0.14em">OPEN-SOURCE REPO</text>
+      <text x="632" y="164" fill="#2d3142" font-size="16" font-weight="600" font-family="'Geist', sans-serif">cortex-mcp</text>
+      <text x="1144" y="164" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="end">single Go binary · distroless container</text>
+
+      <!-- ============ ARROWS (drawn before nodes) ============ -->
+      <!-- Clients to Caddy (fanned attach points 200 / 220 / 240) -->
+      <path d="M240,132 H284 Q292,132 292,140 V192 Q292,200 300,200 H344" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <line x1="240" y1="220" x2="344" y2="220" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <path d="M240,308 H284 Q292,308 292,300 V248 Q292,240 300,240 H344" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="244" y="200" width="44" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="266" y="209" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HTTPS</text>
+
+      <!-- Caddy to transport/ -->
+      <line x1="544" y1="220" x2="640" y2="220" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="552" y="200" width="56" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="580" y="209" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">FORWARD</text>
+
+      <!-- vault/ to Vault folder (read / write, focal) -->
+      <line x1="800" y1="544" x2="800" y2="616" stroke="#eb6c36" stroke-width="1.2" marker-start="url(#arrow-accent)" marker-end="url(#arrow-accent)"/>
+      <rect x="808" y="580" width="68" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="842" y="589" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">READ / WRITE</text>
+
+      <!-- Vault folder to Syncthing -->
+      <line x1="680" y1="652" x2="544" y2="652" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="596" y="632" width="32" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="612" y="641" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SYNC</text>
+
+      <!-- Syncthing to Laptop (two-way) -->
+      <line x1="444" y1="688" x2="444" y2="760" stroke="#4f5d75" stroke-width="1.2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+      <rect x="452" y="716" width="48" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="476" y="725" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TWO-WAY</text>
+
+      <!-- Vault folder to weekly timer -->
+      <line x1="920" y1="652" x2="976" y2="652" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="928" y="632" width="40" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="948" y="641" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">COMMIT</text>
+
+      <!-- Weekly timer to GitHub -->
+      <line x1="1056" y1="688" x2="1056" y2="760" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="1064" y="716" width="32" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="1080" y="725" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PUSH</text>
+
+      <!-- ============ NODES ============ -->
+      <!-- Clients (input / user) -->
+      <rect x="40" y="100" width="200" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="40" y="100" width="200" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+      <text x="140" y="128" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Claude Code (desktop)</text>
+      <text x="140" y="144" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Bearer token</text>
+
+      <rect x="40" y="188" width="200" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="40" y="188" width="200" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+      <text x="140" y="216" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Meta Muse (phone)</text>
+      <text x="140" y="232" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">OAuth 2.1 custom connector</text>
+
+      <rect x="40" y="276" width="200" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="40" y="276" width="200" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="140" y="304" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Future AIs</text>
+      <text x="140" y="320" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Grok, ChatGPT, ... · OAuth 2.1</text>
+
+      <!-- Caddy -->
+      <rect x="344" y="180" width="200" height="80" rx="6" fill="#f5f5f5"/>
+      <rect x="344" y="180" width="200" height="80" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="352" y="186" width="40" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="372" y="195" fill="rgba(45,49,66,0.80)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">PROXY</text>
+      <text x="444" y="220" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Caddy reverse proxy</text>
+      <text x="444" y="236" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">existing · :443</text>
+      <text x="444" y="248" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">mcp.&lt;your-domain&gt;</text>
+
+      <!-- transport/ : MCP -->
+      <rect x="640" y="192" width="320" height="56" rx="6" fill="#f5f5f5"/>
+      <rect x="640" y="192" width="320" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="656" y="210" fill="#7a8399" font-size="9" font-family="'Geist Mono', monospace">transport/</text>
+      <text x="656" y="228" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif">MCP over Streamable HTTP</text>
+
+      <!-- transport/ : REST fallback (optional) -->
+      <rect x="976" y="192" width="160" height="56" rx="6" fill="#f5f5f5"/>
+      <rect x="976" y="192" width="160" height="56" rx="6" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.30)" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="992" y="210" fill="#7a8399" font-size="9" font-family="'Geist Mono', monospace">transport/</text>
+      <text x="992" y="228" fill="#4f5d75" font-size="12" font-weight="600" font-family="'Geist', sans-serif">REST + OpenAPI</text>
+      <text x="992" y="242" fill="#7a8399" font-size="9" font-family="'Geist Mono', monospace">fallback, only if needed</text>
+
+      <!-- auth/ -->
+      <rect x="640" y="260" width="320" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="640" y="260" width="320" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="656" y="278" fill="#7a8399" font-size="9" font-family="'Geist Mono', monospace">auth/</text>
+      <text x="656" y="296" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif">OAuth 2.1 + optional Bearer tokens</text>
+      <text x="656" y="312" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">passkey (WebAuthn) · TOTP fallback</text>
+      <text x="656" y="324" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">recovery codes</text>
+
+      <!-- Vault instructions -->
+      <rect x="976" y="260" width="160" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="976" y="260" width="160" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="992" y="278" fill="#7a8399" font-size="9" font-family="'Geist Mono', monospace">rules file</text>
+      <text x="992" y="296" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif">Vault instructions</text>
+      <text x="992" y="312" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">sent to every AI</text>
+      <text x="992" y="324" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">on connect</text>
+
+      <!-- tools/ -->
+      <rect x="640" y="344" width="320" height="100" rx="6" fill="#f5f5f5"/>
+      <rect x="640" y="344" width="320" height="100" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="656" y="362" fill="#7a8399" font-size="9" font-family="'Geist Mono', monospace">tools/</text>
+      <text x="656" y="380" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif">12 thin tools</text>
+      <text x="656" y="396" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">read_note · list · search · search_tag</text>
+      <text x="656" y="408" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">backlinks · recent · create_note · append</text>
+      <text x="656" y="420" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">replace_section · update_frontmatter</text>
+      <text x="656" y="432" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">move_note · delete_note (to .trash)</text>
+
+      <!-- logs/ -->
+      <rect x="976" y="344" width="160" height="88" rx="6" fill="#f5f5f5"/>
+      <rect x="976" y="344" width="160" height="88" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="992" y="362" fill="#7a8399" font-size="9" font-family="'Geist Mono', monospace">logs/</text>
+      <text x="992" y="380" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif">Write log</text>
+      <text x="992" y="396" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">one line per write</text>
+      <text x="992" y="408" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">time · token · action</text>
+      <text x="992" y="420" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">path · rotated</text>
+
+      <!-- vault/ (focal) -->
+      <rect x="640" y="456" width="320" height="88" rx="6" fill="#f5f5f5"/>
+      <rect x="640" y="456" width="320" height="88" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+      <text x="656" y="474" fill="#eb6c36" font-size="9" font-family="'Geist Mono', monospace">vault/</text>
+      <text x="656" y="492" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif">Core library</text>
+      <text x="656" y="508" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">knows nothing about MCP or HTTP</text>
+      <text x="656" y="520" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">read · search · write · sections</text>
+      <text x="656" y="532" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">frontmatter · links · trash</text>
+
+      <!-- Syncthing -->
+      <rect x="344" y="616" width="200" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="344" y="616" width="200" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="352" y="622" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="368" y="631" fill="rgba(45,49,66,0.80)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SYNC</text>
+      <text x="444" y="656" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Syncthing</text>
+      <text x="444" y="672" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">seconds, with file versioning</text>
+
+      <!-- Vault folder (store) -->
+      <rect x="680" y="616" width="240" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="680" y="616" width="240" height="72" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+      <rect x="688" y="622" width="36" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.40)" stroke-width="0.8"/>
+      <text x="706" y="631" fill="rgba(79,93,117,0.80)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+      <text x="800" y="652" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Vault folder</text>
+      <text x="800" y="668" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">/data/vault</text>
+      <text x="800" y="680" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Markdown, mounted from host</text>
+
+      <!-- Weekly git timer -->
+      <rect x="976" y="616" width="160" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="976" y="616" width="160" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="984" y="622" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="1002" y="631" fill="rgba(45,49,66,0.80)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">TIMER</text>
+      <text x="1056" y="656" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Weekly git timer</text>
+      <text x="1056" y="672" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">git commit + push</text>
+
+      <!-- Laptop / PC (external) -->
+      <rect x="344" y="760" width="200" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="344" y="760" width="200" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+      <text x="444" y="788" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Laptop / PC</text>
+      <text x="444" y="804" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Obsidian</text>
+
+      <!-- GitHub (external) -->
+      <rect x="976" y="760" width="160" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="976" y="760" width="160" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+      <text x="1056" y="788" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">GitHub</text>
+      <text x="1056" y="804" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">history</text>
+
+      <!-- ============ LEGEND ============ -->
+      <line x1="24" y1="856" x2="1176" y2="856" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <text x="24" y="884" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+
+      <rect x="104" y="872" width="20" height="16" rx="3" fill="rgba(45,49,66,0.04)" stroke="rgba(45,49,66,0.60)" stroke-width="1"/>
+      <text x="132" y="884" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">open-source repo</text>
+
+      <rect x="264" y="872" width="20" height="16" rx="3" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.30)" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="292" y="884" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">your deployment / optional</text>
+
+      <rect x="468" y="872" width="20" height="16" rx="3" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+      <text x="496" y="884" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">external</text>
+
+      <rect x="576" y="872" width="20" height="16" rx="3" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+      <text x="604" y="884" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">AI client</text>
+
+      <rect x="688" y="872" width="20" height="16" rx="3" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+      <text x="716" y="884" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">data store</text>
+
+      <rect x="812" y="872" width="20" height="16" rx="3" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+      <text x="840" y="884" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">focal: core library</text>
+
+      <line x1="976" y1="880" x2="1004" y2="880" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <text x="1012" y="884" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">network (HTTPS)</text>
+    </svg>
