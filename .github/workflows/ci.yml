@@ -28,6 +28,8 @@ jobs:
         run: go test -run='^$' -fuzz=FuzzSplitFrontmatter -fuzztime=20s ./internal/vault
       - name: fuzz frontmatter parse
         run: go test -run='^$' -fuzz=FuzzParseFrontmatter -fuzztime=20s ./internal/vault
+      - name: fuzz heading parser
+        run: go test -run='^$' -fuzz=FuzzParseHeadings -fuzztime=20s ./internal/vault
       - name: staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.1 && staticcheck ./...
       - name: govulncheck
