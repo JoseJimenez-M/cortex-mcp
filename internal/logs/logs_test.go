@@ -369,3 +369,18 @@ func TestOpenRefusesSharedDir(t *testing.T) {
 		t.Errorf("shared dir mode changed to %v", info.Mode())
 	}
 }
+
+func TestOpenFreshChildOfTempDir(t *testing.T) {
+	l, err := Open(filepath.Join(t.TempDir(), "child"), 1024, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Close()
+}
+
+func TestOpenRequiresAbsoluteDir(t *testing.T) {
+	if l, err := Open("relative-logs", 1024, 2); err == nil {
+		_ = l.Close()
+		t.Fatal("Open accepted a relative dir")
+	}
+}

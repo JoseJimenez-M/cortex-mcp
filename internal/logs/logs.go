@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +19,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/JoseJimenez-M/cortex-mcp/internal/fsperm"
 )
 
 const (
@@ -62,23 +65,20 @@ func Open(dir string, maxBytes int64, keep int) (*Logger, error) {
 	if maxBytes < 1 || keep < 1 {
 		return nil, fmt.Errorf("logs: maxBytes and keep must be at least 1 (got %d, %d)", maxBytes, keep)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("logs: open %s: dir must be absolute", dir)
 	}
-	// Never chmod a directory other users share (/tmp, a world-writable mount).
-	if info, err := os.Stat(dir); err != nil {
-		return nil, err
-	} else if m := info.Mode(); m&os.ModeSticky != 0 || m.Perm()&0o002 != 0 {
-		return nil, fmt.Errorf("state dir %s is a shared directory; use a dedicated one", dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("logs: open %s: %w", dir, err)
 	}
 	// MkdirAll leaves an existing directory as it was; tighten it, and report
 	// failure rather than run with a world-readable log.
-	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory needs the owner x bit; 0700 is the tightest usable mode
-		return nil, err
+	if err := fsperm.PrivateDir(dir); err != nil {
+		return nil, fmt.Errorf("logs: open %s: %w", dir, err)
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("logs: open %s: %w", dir, err)
 	}
 	l := &Logger{root: root, maxBytes: maxBytes, keep: keep}
 	if names, err := rotatedNames(root); err == nil {
@@ -90,12 +90,12 @@ func Open(dir string, maxBytes int64, keep int) (*Logger, error) {
 	}
 	if err := l.open(); err != nil {
 		_ = root.Close()
-		return nil, err
+		return nil, fmt.Errorf("logs: open %s: %w", dir, err)
 	}
 	if err := l.f.Chmod(0o600); err != nil { // an existing file keeps its old mode otherwise
 		_ = l.f.Close()
 		_ = root.Close()
-		return nil, err
+		return nil, fmt.Errorf("logs: open %s: %w", dir, err)
 	}
 	return l, nil
 }

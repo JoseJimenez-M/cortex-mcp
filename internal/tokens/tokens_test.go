@@ -367,3 +367,11 @@ func TestPragmas(t *testing.T) {
 		t.Errorf("journal_mode = %q, %v", jm, err)
 	}
 }
+
+func TestOpenFreshChildOfTempDir(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "child", "auth.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JoseJimenez-M/cortex-mcp/internal/fsperm"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -98,14 +99,7 @@ func preparePath(path string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// Never chmod a directory other users share (/tmp, a world-writable
-	// mount): that would change it for everyone, or fail confusingly.
-	if info, err := os.Stat(dir); err != nil {
-		return err
-	} else if m := info.Mode(); m&os.ModeSticky != 0 || m.Perm()&0o002 != 0 {
-		return fmt.Errorf("state dir %s is a shared directory; use a dedicated one", dir)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory needs the execute bit; 0700 is owner-only
+	if err := fsperm.PrivateDir(dir); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- path is operator configuration, not request input
@@ -117,7 +111,7 @@ func preparePath(path string) error {
 	}
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
 		// Tighten files left by an older or manually created database.
-		if err := os.Chmod(p, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsperm.PrivateFile(p); err != nil {
 			return err
 		}
 	}
