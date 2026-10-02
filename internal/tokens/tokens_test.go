@@ -1,6 +1,7 @@
 package tokens
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -32,8 +33,8 @@ func TestCreateAndVerify(t *testing.T) {
 	if !strings.HasPrefix(secret, "cmcp_") || len(secret) < 40 {
 		t.Fatalf("secret %q", secret)
 	}
-	if name, err := s.Verify(secret); err != nil || name != "muse" {
-		t.Fatalf("Verify = %q, %v", name, err)
+	if name, err := s.Verify(secret); err != nil || name.Name != "muse" {
+		t.Fatalf("Verify = %+v, %v", name, err)
 	}
 	long := "cmcp_" + strings.Repeat("A", 500)
 	for _, bad := range []string{"", "nope", "cmcp_", "cmcp_wrong", secret + "x", secret[:len(secret)-1], "cmcp_" + strings.Repeat("!", 43), long} {
@@ -54,8 +55,8 @@ func TestSecretsAreUnique(t *testing.T) {
 	if a == b {
 		t.Fatal("two tokens share a secret")
 	}
-	if n, err := s.Verify(b); err != nil || n != "b" {
-		t.Fatalf("Verify(b) = %q, %v", n, err)
+	if n, err := s.Verify(b); err != nil || n.Name != "b" {
+		t.Fatalf("Verify(b) = %+v, %v", n, err)
 	}
 }
 
@@ -206,8 +207,8 @@ func TestOpenAwkwardPaths(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = s.Close() }()
-			if n, err := s.Verify(secret); err != nil || n != "muse" {
-				t.Fatalf("after reopen: %q, %v", n, err)
+			if n, err := s.Verify(secret); err != nil || n.Name != "muse" {
+				t.Fatalf("after reopen: %+v, %v", n, err)
 			}
 		})
 	}
@@ -217,8 +218,8 @@ func TestReopenKeepsDataAndSchemaVersion(t *testing.T) {
 	s, p := open(t)
 	secret, _ := s.Create("muse")
 	var v int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 1 {
-		t.Fatalf("user_version = %d, %v; want 1", v, err)
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
+		t.Fatalf("user_version = %d, %v; want %d", v, err, schemaVersion)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -228,10 +229,10 @@ func TestReopenKeepsDataAndSchemaVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s2.Close() }()
-	if n, err := s2.Verify(secret); err != nil || n != "muse" {
-		t.Fatalf("after reopen: %q, %v", n, err)
+	if n, err := s2.Verify(secret); err != nil || n.Name != "muse" {
+		t.Fatalf("after reopen: %+v, %v", n, err)
 	}
-	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 1 {
+	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
 		t.Fatalf("user_version after reopen = %d, %v", v, err)
 	}
 }
@@ -275,8 +276,8 @@ func TestConcurrentUse(t *testing.T) {
 				return
 			}
 			for j := 0; j < 20; j++ {
-				if n, err := s.Verify(secret); err != nil || n != "shared" {
-					t.Errorf("Verify shared = %q, %v", n, err)
+				if n, err := s.Verify(secret); err != nil || n.Name != "shared" {
+					t.Errorf("Verify shared = %+v, %v", n, err)
 				}
 				if _, err := s.Verify(sec); err != nil {
 					t.Errorf("Verify %s: %v", name, err)
@@ -374,4 +375,107 @@ func TestOpenFreshChildOfTempDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = s.Close()
+}
+
+func TestIdentityIsPerTokenRow(t *testing.T) {
+	s, _ := open(t)
+	first, err := s.Create("muse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.Verify(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.Verify(first)
+	if err != nil || again != a {
+		t.Fatalf("identity not stable across calls: %+v then %+v, %v", a, again, err)
+	}
+	if err := s.Revoke("muse"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Create("muse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.Verify(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Name != "muse" || b.Name != "muse" || a.ID == "" || b.ID == "" || a.ID == b.ID {
+		t.Fatalf("re-created token must get a new identity: %+v, %+v", a, b)
+	}
+	if strings.Contains(a.ID, first) || strings.Contains(b.ID, second) {
+		t.Fatal("identity must not contain the secret")
+	}
+}
+
+// v1Database writes a database as schema version 1 left it: no id column.
+func v1Database(t *testing.T, p string, rows map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`CREATE TABLE bearer_tokens (
+		name      TEXT PRIMARY KEY,
+		hash      BLOB NOT NULL UNIQUE,
+		created   INTEGER NOT NULL,
+		last_used INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for name, secret := range rows {
+		if _, err := db.Exec(`INSERT INTO bearer_tokens(name, hash, created) VALUES(?, ?, 1)`, name, hash(secret)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrateFromVersion1(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state", "auth.db")
+	secrets := map[string]string{"muse": prefix + strings.Repeat("A", 43), "cli": prefix + strings.Repeat("B", 43)}
+	v1Database(t, p, secrets)
+	s, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 2 {
+		t.Fatalf("user_version after migration = %d, %v; want 2", v, err)
+	}
+	ids := map[string]Identity{}
+	for name, secret := range secrets {
+		id, err := s.Verify(secret)
+		if err != nil || id.Name != name || id.ID == "" {
+			t.Fatalf("Verify(%s) after migration = %+v, %v", name, id, err)
+		}
+		ids[name] = id
+	}
+	if ids["muse"].ID == ids["cli"].ID {
+		t.Fatal("migrated rows share an identity")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+	for name, secret := range secrets {
+		if id, err := s2.Verify(secret); err != nil || id != ids[name] {
+			t.Fatalf("identity changed on reopen: %+v, want %+v (%v)", id, ids[name], err)
+		}
+	}
+	if _, err := s2.db.Exec(`UPDATE bearer_tokens SET id = (SELECT id FROM bearer_tokens WHERE name = 'cli') WHERE name = 'muse'`); err == nil {
+		t.Fatal("duplicate identities accepted: id must be unique")
+	}
 }

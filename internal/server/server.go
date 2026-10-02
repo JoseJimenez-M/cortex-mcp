@@ -215,13 +215,17 @@ func (o Options) instructions() (string, error) {
 	return DefaultInstructions + "\n\n" + text, nil
 }
 
-// bearerVerifier maps a secret to its client name. Malformed secrets are
-// rejected inside tokens.Verify before any database lookup, so junk requests
-// are cheap. Store failures return a fixed message: the SDK writes the error
-// text into the response body, which must not expose internals.
+// bearerVerifier maps a secret to its token's identity. UserID is the token
+// row's id, never reused, so the SDK binds each session to the token that
+// opened it and a token re-created under a revoked name cannot reach the old
+// token's sessions. Extra["client"] is the plain name, for logs, attribution
+// and the rate limit. Malformed secrets are rejected inside tokens.Verify
+// before any database lookup, so junk requests are cheap. Store failures
+// return a fixed message: the SDK writes the error text into the response
+// body, which must not expose internals.
 func bearerVerifier(store *tokens.Store, lg *slog.Logger) auth.TokenVerifier {
 	return func(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
-		name, err := store.Verify(token)
+		id, err := store.Verify(token)
 		if errors.Is(err, tokens.ErrInvalid) {
 			return nil, auth.ErrInvalidToken
 		}
@@ -229,31 +233,43 @@ func bearerVerifier(store *tokens.Store, lg *slog.Logger) auth.TokenVerifier {
 			lg.Error("token store failure", "err", err)
 			return nil, errors.New("authentication unavailable")
 		}
-		return &auth.TokenInfo{UserID: name, Extra: map[string]any{"client": name}}, nil
+		return &auth.TokenInfo{UserID: id.ID, Extra: map[string]any{"client": id.Name}}, nil
 	}
+}
+
+// clientName is the authenticated client's token name, or "" when the request
+// carries no usable TokenInfo.
+func clientName(r *http.Request) string {
+	ti := auth.TokenInfoFromContext(r.Context())
+	if ti == nil || ti.UserID == "" {
+		return ""
+	}
+	name, _ := ti.Extra["client"].(string)
+	return name
 }
 
 // rateLimit allows perMinute requests per authenticated client, with a burst
 // of a sixth of that (10 at the default 60), enough for an MCP handshake plus
 // a call. It runs after auth, so unauthenticated traffic never creates a
-// limiter: the map is keyed by token name and so bounded by the number of
-// tokens ever issued (a handful), with no eviction needed. If tokens ever
-// become self-service, add eviction here.
+// limiter: the map is keyed by token name (so a token re-created under the
+// same name keeps the old budget) and bounded by the number of names ever
+// issued (a handful), with no eviction needed. If tokens ever become
+// self-service, add eviction here.
 func rateLimit(perMinute int, next http.Handler) http.Handler {
 	var mu sync.Mutex
 	limiters := map[string]*rate.Limiter{}
 	burst := max(1, perMinute/6)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ti := auth.TokenInfoFromContext(r.Context())
-		if ti == nil || ti.UserID == "" { // unreachable behind requireToken; fail closed
+		name := clientName(r)
+		if name == "" { // unreachable behind requireToken; fail closed
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		mu.Lock()
-		l, ok := limiters[ti.UserID]
+		l, ok := limiters[name]
 		if !ok {
 			l = rate.NewLimiter(rate.Limit(float64(perMinute)/60), burst)
-			limiters[ti.UserID] = l
+			limiters[name] = l
 		}
 		mu.Unlock()
 		if !l.Allow() {

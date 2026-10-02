@@ -596,3 +596,59 @@ func TestNearCapNewlineWriteReachesVault(t *testing.T) {
 		t.Fatalf("result = %q, want write_too_large", b.String())
 	}
 }
+
+// postWithSession sends a ping on an existing session and returns the status.
+func postWithSession(t *testing.T, e env, secret, sid string) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, e.url+"/mcp", strings.NewReader(pingBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Mcp-Session-Id", sid)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestRecreatedTokenCannotJoinOldSession(t *testing.T) {
+	e := setup(t, nil)
+	old, err := e.store.Create("muse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := connect(t, e, old).ID()
+	if code := postWithSession(t, e, old, sid); code != http.StatusOK {
+		t.Fatalf("own session: status %d, want 200", code)
+	}
+	if err := e.store.Revoke("muse"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := e.store.Create("muse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := postWithSession(t, e, fresh, sid); code != http.StatusForbidden && code != http.StatusNotFound {
+		t.Fatalf("re-created token on the old session: status %d, want 403 or 404", code)
+	}
+}
+
+func TestRateLimitKeysOnClientName(t *testing.T) {
+	e := setup(t, func(c *config.Config) { c.Limits.RequestsPerMinute = 6 }) // burst 1
+	if code := post(t, e.url, "Bearer "+e.secret); code == http.StatusTooManyRequests {
+		t.Fatal("first request was rate limited")
+	}
+	if err := e.store.Revoke("test-client"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := e.store.Create("test-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := post(t, e.url, "Bearer "+fresh); code != http.StatusTooManyRequests {
+		t.Fatalf("re-created token got a fresh budget: status %d, want 429", code)
+	}
+}

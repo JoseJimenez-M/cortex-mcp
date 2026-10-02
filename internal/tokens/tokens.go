@@ -42,8 +42,8 @@ const (
 	// len(prefix)+43 characters.
 	maxSecretLen = 128
 	// schemaVersion is stored in PRAGMA user_version so later plans (OAuth)
-	// can migrate the same database.
-	schemaVersion = 1
+	// can migrate the same database. Version 2 added the id column.
+	schemaVersion = 2
 	// lastUsedGranularity limits last_used writes to one per token per
 	// minute: the value is informational, and a write per request would
 	// serialize every authenticated call behind SQLite's writer lock.
@@ -55,6 +55,14 @@ type Record struct {
 	Name     string
 	Created  time.Time
 	LastUsed time.Time // zero if never used
+}
+
+// Identity names the token row a secret belongs to. Name is the operator's
+// label and can be reused after a revoke; ID is random per row and is never
+// reused, so it is what an MCP session must be bound to.
+type Identity struct {
+	Name string
+	ID   string
 }
 
 // Store is the token table inside the auth database. It is safe for
@@ -141,7 +149,17 @@ func migrate(db *sql.DB) error {
 	if v > schemaVersion {
 		return fmt.Errorf("auth database has schema version %d, this build supports up to %d", v, schemaVersion)
 	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS bearer_tokens (
+	if v == schemaVersion {
+		return nil
+	}
+	// One transaction, so a failure leaves the database at its old version
+	// (user_version lives in the database header and is transactional).
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS bearer_tokens (
 		name      TEXT PRIMARY KEY,
 		hash      BLOB NOT NULL UNIQUE,
 		created   INTEGER NOT NULL,
@@ -149,13 +167,54 @@ func migrate(db *sql.DB) error {
 	)`); err != nil {
 		return err
 	}
-	if v < schemaVersion {
-		// PRAGMA does not accept bound parameters; the value is a constant.
-		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+	if v < 2 {
+		if err := addIDColumn(tx); err != nil {
 			return err
 		}
 	}
-	return nil
+	// PRAGMA does not accept bound parameters; the value is a constant.
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// addIDColumn is the version 1 to 2 migration. Name is the primary key, but a
+// name is free again after a revoke, and the implicit rowid can be reused once
+// the highest row is deleted, so neither identifies a token row for good. A
+// random id per row does. ALTER TABLE cannot add a NOT NULL column without a
+// default, so the column is nullable; every row is filled here and Create
+// always sets it.
+func addIDColumn(tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE bearer_tokens ADD COLUMN id TEXT`); err != nil {
+		return err
+	}
+	rows, err := tx.Query(`SELECT name FROM bearer_tokens WHERE id IS NULL`)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		names = append(names, n)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, n := range names {
+		if _, err := tx.Exec(`UPDATE bearer_tokens SET id = ? WHERE name = ?`, rand.Text(), n); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`CREATE UNIQUE INDEX bearer_tokens_id ON bearer_tokens(id)`)
+	return err
 }
 
 func hash(secret string) []byte {
@@ -185,7 +244,9 @@ func (s *Store) Create(name string) (string, error) {
 		return "", err
 	}
 	secret := prefix + base64.RawURLEncoding.EncodeToString(b)
-	_, err := s.db.Exec(`INSERT INTO bearer_tokens(name, hash, created) VALUES(?, ?, ?)`, name, hash(secret), s.now().Unix())
+	// rand.Text has 130 bits of entropy: an id is never reused in practice,
+	// and the UNIQUE index rejects the impossible collision.
+	_, err := s.db.Exec(`INSERT INTO bearer_tokens(name, hash, created, id) VALUES(?, ?, ?, ?)`, name, hash(secret), s.now().Unix(), rand.Text())
 	if err != nil {
 		if isConstraint(err) {
 			return "", ErrExists
@@ -205,26 +266,26 @@ func wellFormed(secret string) bool {
 	return err == nil && len(raw) == secretBytes
 }
 
-// Verify returns the client name for a valid secret and records its use.
+// Verify returns the identity of a valid secret's token and records its use.
 // Secrets have 256 bits of entropy, so a plain hash lookup leaks nothing
 // useful through timing. The secret never appears in an error.
-func (s *Store) Verify(secret string) (string, error) {
+func (s *Store) Verify(secret string) (Identity, error) {
 	if !wellFormed(secret) {
-		return "", ErrInvalid
+		return Identity{}, ErrInvalid
 	}
-	var name string
-	err := s.db.QueryRow(`SELECT name FROM bearer_tokens WHERE hash = ?`, hash(secret)).Scan(&name)
+	var id Identity
+	err := s.db.QueryRow(`SELECT name, id FROM bearer_tokens WHERE hash = ?`, hash(secret)).Scan(&id.Name, &id.ID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrInvalid
+		return Identity{}, ErrInvalid
 	}
 	if err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	now := s.now().Unix()
-	if _, err := s.db.Exec(`UPDATE bearer_tokens SET last_used = ? WHERE name = ? AND last_used < ?`, now, name, now-lastUsedGranularity); err != nil {
-		return "", err
+	if _, err := s.db.Exec(`UPDATE bearer_tokens SET last_used = ? WHERE name = ? AND last_used < ?`, now, id.Name, now-lastUsedGranularity); err != nil {
+		return Identity{}, err
 	}
-	return name, nil
+	return id, nil
 }
 
 // List returns every token, by name.
