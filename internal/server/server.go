@@ -87,7 +87,8 @@ func New(o Options) http.Handler {
 		idle = idleSessionTimeout
 	}
 	cache := &serverCache{o: o}
-	mcpHandler := mcp.NewStreamableHTTPHandler(cache.get, &mcp.StreamableHTTPOptions{
+	sessions := newSessionLimiter(maxSessionsPerClient)
+	mcpHandler := mcp.NewStreamableHTTPHandler(sessions.servers(cache.get), &mcp.StreamableHTTPOptions{
 		MaxRequestBodyBytes:        escapeFactor*o.Config.Limits.MaxWriteBytes + envelopeBytes,
 		DisableLocalhostProtection: !isLocalURL(o.Config.PublicURL),
 		SessionTimeout:             idle,
@@ -96,7 +97,9 @@ func New(o Options) http.Handler {
 	requireToken := auth.RequireBearerToken(bearerVerifier(o.Tokens, o.Logger), &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", noStore(requireToken(rateLimit(o.Config.Limits.RequestsPerMinute, mcpHandler))))
+	// Rate limit before the session cap, so refused session attempts still
+	// spend the client's budget.
+	mux.Handle("/mcp", noStore(requireToken(rateLimit(o.Config.Limits.RequestsPerMinute, sessions.limit(mcpHandler)))))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
