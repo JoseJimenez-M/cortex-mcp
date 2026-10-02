@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -39,9 +40,16 @@ func New(dir string, opts Options) (*Vault, error) {
 	deny := make([]string, 0, len(opts.Deny))
 	for _, d := range opts.Deny {
 		d = strings.Trim(path.Clean("/"+filepath.ToSlash(d)), "/")
-		if d != "" {
-			deny = append(deny, d)
+		if d == "" {
+			continue
 		}
+		// Operator config error: an entry with characters clean rejects could
+		// never match, which would silently leave the path unprotected.
+		if err := checkChars(d); err != nil {
+			_ = r.Close()
+			return nil, fmt.Errorf("invalid deny entry %q: %w", d, err)
+		}
+		deny = append(deny, d)
 	}
 	return &Vault{root: r, deny: deny, maxWrite: maxWrite, now: time.Now}, nil
 }

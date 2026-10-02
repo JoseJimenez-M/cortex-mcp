@@ -3,6 +3,7 @@ package vault
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +49,17 @@ func TestErrorFormatAndCodeOf(t *testing.T) {
 	}
 	if CodeOf(os.ErrClosed) != "" {
 		t.Fatal("CodeOf on a non-vault error must be empty")
+	}
+}
+
+func TestNewRejectsInvalidDenyEntries(t *testing.T) {
+	for _, d := range []string{"Priv\x00ate", "a/ b", "x \u202e", "bad\\name", "\xff", "a/\u200b"} {
+		_, err := New(t.TempDir(), Options{Deny: []string{"ok", d}})
+		if err == nil || !strings.Contains(err.Error(), "deny entry") {
+			t.Errorf("New with deny %q: err = %v, want an error naming the entry", d, err)
+		}
+	}
+	if _, err := New(t.TempDir(), Options{Deny: []string{"Private/", "Work/secret.md", "año"}}); err != nil {
+		t.Errorf("valid deny entries rejected: %v", err)
 	}
 }

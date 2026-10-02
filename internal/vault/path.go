@@ -55,41 +55,75 @@ func (v *Vault) clean(rel string, a access, wantMD bool) (string, error) {
 	if wantMD && !strings.EqualFold(path.Ext(p), ".md") {
 		return "", errf(CodeNotMarkdown, "only .md notes are supported")
 	}
-	segs := strings.Split(p, "/")
-	for _, seg := range segs {
-		for _, n := range neverAccessible {
-			if strings.EqualFold(seg, n) {
-				return "", errf(CodePathProtected, "%s is protected", n)
-			}
-		}
-	}
-	if a == accessWrite && strings.EqualFold(segs[0], trashDir) {
-		return "", errf(CodePathProtected, ".trash is receive-only: use delete_note to trash a note and move_note to restore it")
-	}
-	lp := strings.ToLower(p)
-	for _, d := range v.deny {
-		ld := strings.ToLower(d)
-		if lp == ld || strings.HasPrefix(lp, ld+"/") {
-			return "", errf(CodePathProtected, "%s is protected by the server configuration", d)
-		}
+	if err := v.protectedErr(p, a); err != nil {
+		return "", err
 	}
 	return p, nil
 }
 
-// checkChars rejects input that is ambiguous across platforms or unsafe to
-// echo: control characters (including NUL), backslash (a separator on
-// Windows), and leading or trailing whitespace. Whitespace is rejected, not
-// trimmed, so the path that is checked is the path that is used.
-func checkChars(rel string) error {
-	for _, r := range rel {
-		if unicode.IsControl(r) || r == '\\' {
-			return errf(CodeInvalidPath, "paths may not contain control characters or backslashes")
+// protectedErr is the single definition of which cleaned, slash-separated
+// paths are off limits: neverAccessible names at any depth, the top-level
+// trash for writes, and the operator's deny list. Everything folds case with
+// strings.EqualFold, segment by segment, so all rules agree on what "the same
+// name" means. Any later folder walk (listing, search) MUST call this same
+// helper on each entry so it cannot expose what clean refuses.
+func (v *Vault) protectedErr(p string, a access) error {
+	segs := strings.Split(p, "/")
+	for _, seg := range segs {
+		for _, n := range neverAccessible {
+			if strings.EqualFold(seg, n) {
+				return errf(CodePathProtected, "%s is protected", n)
+			}
 		}
 	}
-	first, _ := utf8.DecodeRuneInString(rel)
-	last, _ := utf8.DecodeLastRuneInString(rel)
-	if rel != "" && (unicode.IsSpace(first) || unicode.IsSpace(last)) {
-		return errf(CodeInvalidPath, "paths may not start or end with whitespace")
+	if a == accessWrite && strings.EqualFold(segs[0], trashDir) {
+		return errf(CodePathProtected, ".trash is receive-only: use delete_note to trash a note and move_note to restore it")
+	}
+	for _, d := range v.deny {
+		if hasFoldPrefix(segs, strings.Split(d, "/")) {
+			return errf(CodePathProtected, "%s is protected by the server configuration", d)
+		}
+	}
+	return nil
+}
+
+// hasFoldPrefix reports whether prefix is a segment-wise EqualFold prefix of segs.
+func hasFoldPrefix(segs, prefix []string) bool {
+	if len(prefix) > len(segs) {
+		return false
+	}
+	for i, ps := range prefix {
+		if !strings.EqualFold(segs[i], ps) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkChars rejects input that is ambiguous across platforms or unsafe to
+// echo: invalid UTF-8, control and Unicode format characters (NUL, bidi
+// overrides, zero-width and BOM), backslash (a separator on Windows), and
+// leading or trailing whitespace on the whole string and on every segment.
+// Whitespace is rejected, not trimmed, so the path that is checked is the
+// path that is used.
+func checkChars(rel string) error {
+	if !utf8.ValidString(rel) {
+		return errf(CodeInvalidPath, "paths must be valid UTF-8")
+	}
+	for _, r := range rel {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\\' {
+			return errf(CodeInvalidPath, "paths may not contain control or format characters or backslashes")
+		}
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == "" {
+			continue
+		}
+		first, _ := utf8.DecodeRuneInString(seg)
+		last, _ := utf8.DecodeLastRuneInString(seg)
+		if unicode.IsSpace(first) || unicode.IsSpace(last) {
+			return errf(CodeInvalidPath, "path segments may not start or end with whitespace")
+		}
 	}
 	return nil
 }

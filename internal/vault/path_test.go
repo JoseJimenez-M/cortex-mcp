@@ -38,6 +38,10 @@ func TestCleanAcceptsVaultRelativePaths(t *testing.T) {
 		{".trash/.GIT.md", accessRead, true, ".trash/.GIT.md"},
 		{"x/.Trash/y.md", accessWrite, true, "x/.Trash/y.md"},
 		{"Library", accessRead, false, "Library"},
+		{"Library/My Note.md", accessWrite, true, "Library/My Note.md"},
+		{"Personal/año.md", accessWrite, true, "Personal/año.md"},
+		{"Notas/canción de prueba.md", accessWrite, true, "Notas/canción de prueba.md"},
+		{"日本語/メモ.md", accessWrite, true, "日本語/メモ.md"},
 	}
 	for _, c := range cases {
 		got, err := v.clean(c.in, c.a, c.md)
@@ -86,6 +90,13 @@ func TestCleanRejectsUnsafePaths(t *testing.T) {
 		{"Private/x.md", accessRead, true, CodePathProtected},
 		{"Private", accessRead, false, CodePathProtected},
 		{"Work/secret.md", accessRead, true, CodePathProtected},
+		{"x/.git /y.md", accessRead, true, CodeInvalidPath},
+		{"a /b.md", accessRead, true, CodeInvalidPath},
+		{"a/ b.md", accessRead, true, CodeInvalidPath},
+		{"a/\u202eb.md", accessRead, true, CodeInvalidPath},
+		{"a/b\u200b.md", accessRead, true, CodeInvalidPath},
+		{"\ufeffa.md", accessRead, true, CodeInvalidPath},
+		{"a/\xff.md", accessRead, true, CodeInvalidPath},
 	}
 	for _, c := range cases {
 		_, err := v.clean(c.in, c.a, c.md)
@@ -95,15 +106,26 @@ func TestCleanRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
+func TestCleanDenyFoldsCaseLikeProtectedNames(t *testing.T) {
+	v, _ := newTestVault(t, Options{Deny: []string{"Secret.md"}})
+	for _, in := range []string{"Secret.md", "SECRET.md", "ſecret.md", "ſecret.md/x.md"} {
+		_, err := v.clean(in, accessRead, false)
+		wantCode(t, err, CodePathProtected)
+	}
+	if _, err := v.clean("Secrets.md", accessRead, true); err != nil {
+		t.Errorf("Secrets.md must not match deny Secret.md: %v", err)
+	}
+}
+
 func FuzzCleanNeverEscapes(f *testing.F) {
 	seeds := []string{"a.md", "../a.md", "a/../../b.md", "/x.md", ".git/x.md", "a//b/./c.md", "\x00",
 		".trash/../.git/x", "a/.git/x.md", ".GIT/x", ".//a.md", "././a.md", "a\\b.md", " a.md", "a/.Obsidian/b", ".Trash/x"}
 	for _, s := range seeds {
-		for m := uint8(0); m < 4; m++ {
+		for m := uint8(0); m < 8; m++ {
 			f.Add(s, m)
 		}
 	}
-	v, err := New(f.TempDir(), Options{})
+	v, err := New(f.TempDir(), Options{Deny: []string{"Private"}})
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -111,7 +133,13 @@ func FuzzCleanNeverEscapes(f *testing.F) {
 		a := access(mode % 3)
 		wantMD := mode&4 != 0
 		p, err := v.clean(in, a, wantMD)
-		if err != nil || p == "." {
+		if err != nil {
+			return
+		}
+		if p == "." {
+			if wantMD {
+				t.Fatalf("clean(%q) = %q accepted the root as a note", in, p)
+			}
 			return
 		}
 		if !filepath.IsLocal(filepath.FromSlash(p)) || path.Clean(p) != p {
@@ -125,6 +153,9 @@ func FuzzCleanNeverEscapes(f *testing.F) {
 				if strings.EqualFold(seg, n) {
 					t.Fatalf("clean(%q) = %q reached protected %s", in, p, n)
 				}
+			}
+			if i == 0 && strings.EqualFold(seg, "Private") {
+				t.Fatalf("clean(%q) = %q reached the denied Private folder", in, p)
 			}
 			if i == 0 && a == accessWrite && strings.EqualFold(seg, trashDir) {
 				t.Fatalf("clean(%q) = %q writes into the trash", in, p)
