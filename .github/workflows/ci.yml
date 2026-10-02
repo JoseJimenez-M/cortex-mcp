@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: coverage
+        run: go tool cover -func=coverage.out | tail -1
+      - name: fuzz path validation
+        run: go test -run='^$' -fuzz=FuzzCleanNeverEscapes -fuzztime=20s ./internal/vault
+      - name: staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.1 && staticcheck ./...
+      - name: govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0 && govulncheck ./...
+      - name: gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0 && gosec ./...
