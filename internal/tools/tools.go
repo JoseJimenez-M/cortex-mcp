@@ -1,5 +1,8 @@
 // Package tools exposes the vault as MCP tools. Handlers are thin: they
 // call the vault, log writes, and map errors. No file I/O happens here.
+// SDK-generated schema and unmarshal errors do not follow the
+// "<code>: <sentence>" format (out of scope); they may echo client values,
+// never host paths.
 package tools
 
 import (
@@ -155,12 +158,12 @@ func Register(s *mcp.Server, d Deps) {
 	mcp.AddTool(s, &mcp.Tool{Name: "search", Annotations: readOnly(), Description: "Find lines containing some text, case-insensitive. Returns paths, line numbers, and snippets. limit defaults to 20, at most 100."}, d.search)
 	mcp.AddTool(s, &mcp.Tool{Name: "search_tag", Annotations: readOnly(), Description: "Find notes with a tag, in frontmatter tags or inline as #tag. At most 500 paths; truncated is true when more exist."}, d.searchTag)
 	mcp.AddTool(s, &mcp.Tool{Name: "backlinks", Annotations: readOnly(), Description: "Find notes that link to a note, by wikilink or Markdown link. At most 500 paths; truncated is true when more exist."}, d.backlinks)
-	mcp.AddTool(s, &mcp.Tool{Name: "recent", Annotations: readOnly(), Description: "List notes modified in the last N days (1 to 365), newest first, with the clients that changed them through this server. At most 500 notes; truncated is true when more exist."}, d.recent)
+	mcp.AddTool(s, &mcp.Tool{Name: "recent", Annotations: readOnly(), Description: "List notes modified in the last N days (1 to 365), newest first, with the clients that changed them through this server. Clients come from this server's write log and paths are matched as the assistant wrote them, so a non-canonical spelling may miss attribution. At most 500 notes; truncated is true when more exist."}, d.recent)
 	mcp.AddTool(s, &mcp.Tool{Name: "create_note", Annotations: writes(false, false), Description: "Create a new note. Fails if the note exists: use append or replace_section to change existing notes."}, d.createNote)
 	mcp.AddTool(s, &mcp.Tool{Name: "append", Annotations: writes(false, false), Description: "Add text at the end of a note, or at the end of one section. Safe without a version: it never overwrites."}, d.appendNote)
 	mcp.AddTool(s, &mcp.Tool{Name: "replace_section", Annotations: writes(true, true), Description: "Replace the body of one section, including all of its subsections. A content that contains headings or code fences changes the structure of the note. Requires the version from read_note; if the note changed, read it again."}, d.replaceSection)
-	mcp.AddTool(s, &mcp.Tool{Name: "update_frontmatter", Annotations: writes(false, true), Description: "Set or remove frontmatter keys without touching the body. Requires the version from read_note."}, d.updateFrontmatter)
-	mcp.AddTool(s, &mcp.Tool{Name: "move_note", Annotations: writes(false, false), Description: "Move or rename a note, or restore one from .trash. Links in other notes are not rewritten: still_linking lists the notes that still link to the old path. A move that keeps the file name may still list notes with a [[name]] link, which Obsidian resolves by name. backlinks_complete is false when the move succeeded but the link scan failed."}, d.moveNote)
+	mcp.AddTool(s, &mcp.Tool{Name: "update_frontmatter", Annotations: writes(true, true), Description: "Set or remove frontmatter keys without touching the body. Requires the version from read_note."}, d.updateFrontmatter)
+	mcp.AddTool(s, &mcp.Tool{Name: "move_note", Annotations: writes(true, false), Description: "Move or rename a note, or restore one from .trash. Links in other notes are not rewritten: still_linking lists the notes that still link to the old path. A move that keeps the file name may still list notes with a [[name]] link, which Obsidian resolves by name. backlinks_complete is false when the move succeeded but the link scan failed."}, d.moveNote)
 	mcp.AddTool(s, &mcp.Tool{Name: "delete_note", Annotations: writes(true, false), Description: "Move a note to .trash. Nothing is permanently deleted."}, d.deleteNote)
 }
 
@@ -204,6 +207,8 @@ func toolErr(tool string, err error) error {
 	if vault.CodeOf(err) != "" {
 		return err
 	}
+	// The logged error may contain the vault-relative path the assistant
+	// sent (not a secret). Never log note content or frontmatter values.
 	slog.Error("tool failed", "tool", tool, "err", err)
 	return errors.New("internal_error: the server could not complete the request")
 }
@@ -261,6 +266,8 @@ func (d Deps) search(_ context.Context, _ *mcp.CallToolRequest, in SearchIn) (*m
 		limit = defaultSearchLimit
 	}
 	limit = min(limit, maxSearchLimit)
+	// No truncation signal: the vault clamps at 100 and does not report
+	// whether more hits exist (follow-up).
 	hits, err := d.Vault.Search(in.Query, in.Folder, limit)
 	if err != nil {
 		return nil, SearchOut{}, toolErr("search", err)
@@ -313,8 +320,18 @@ func (d Deps) recent(_ context.Context, _ *mcp.CallToolRequest, in RecentIn) (*m
 	}
 	clients := map[string][]string{}
 	for _, e := range entries {
-		if e.Result == "ok" && !slices.Contains(clients[e.Path], e.Client) {
-			clients[e.Path] = append(clients[e.Path], e.Client)
+		if e.Result != "ok" {
+			continue
+		}
+		p := e.Path
+		if e.Tool == "move_note" {
+			// Logged as "from -> to"; the note now lives at the destination.
+			if _, to, found := strings.Cut(p, " -> "); found {
+				p = to
+			}
+		}
+		if !slices.Contains(clients[p], e.Client) {
+			clients[p] = append(clients[p], e.Client)
 		}
 	}
 	out := RecentOut{Notes: []RecentNoteOut{}}

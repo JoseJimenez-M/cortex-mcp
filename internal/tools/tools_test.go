@@ -229,7 +229,7 @@ func TestToolAnnotations(t *testing.T) {
 		if a.ReadOnlyHint != slices.Contains(reads, tool.Name) {
 			t.Errorf("%s: ReadOnlyHint = %v", tool.Name, a.ReadOnlyHint)
 		}
-		wantDestructive := tool.Name == "replace_section" || tool.Name == "delete_note"
+		wantDestructive := slices.Contains([]string{"replace_section", "delete_note", "update_frontmatter", "move_note"}, tool.Name)
 		if !a.ReadOnlyHint && (a.DestructiveHint == nil || *a.DestructiveHint != wantDestructive) {
 			t.Errorf("%s: DestructiveHint = %v, want %v", tool.Name, a.DestructiveHint, wantDestructive)
 		}
@@ -391,5 +391,16 @@ func TestReadNoteWithRichFrontmatterPassesOutputSchema(t *testing.T) {
 	decode(t, call(t, e, "read_note", map[string]any{"path": "a.md"}), &n)
 	if n.Frontmatter["nested"] == nil || n.Frontmatter["tags"] == nil {
 		t.Fatalf("note = %+v", n)
+	}
+}
+
+func TestRecentCreditsMoveDestination(t *testing.T) {
+	e := connect(t)
+	call(t, e, "create_note", map[string]any{"path": "a.md", "content": "x"})
+	call(t, e, "move_note", map[string]any{"from": "a.md", "to": "b.md"})
+	var recent RecentOut
+	decode(t, call(t, e, "recent", map[string]any{"days": 1}), &recent)
+	if len(recent.Notes) != 1 || recent.Notes[0].Path != "b.md" || !slices.Contains(recent.Notes[0].Clients, "unknown") {
+		t.Fatalf("recent = %+v", recent)
 	}
 }
