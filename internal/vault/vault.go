@@ -30,6 +30,8 @@ type Vault struct {
 	// link is the hard-link primitive; a field so tests can simulate
 	// filesystems without hard links.
 	link func(oldname, newname string) error
+	// backlinks is the post-move scan; a field so tests can inject a failure.
+	backlinks func(rel string) ([]string, error)
 }
 
 // New opens dir as a vault. dir must exist.
@@ -58,6 +60,7 @@ func New(dir string, opts Options) (*Vault, error) {
 	}
 	v := &Vault{root: r, deny: deny, maxWrite: maxWrite, maxRead: maxNoteBytes, now: time.Now}
 	v.link = r.Link
+	v.backlinks = v.Backlinks
 	return v, nil
 }
 

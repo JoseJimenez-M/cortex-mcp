@@ -20,12 +20,13 @@ const maxTrashAttempts = 1000
 // So the preferred publish is link(2) of src to dst, which is atomic and fails
 // with EEXIST, followed by removing src. Content, mode and mtime are those of
 // the original file because nothing is rewritten. A crash between the link and
-// the remove leaves the note under both names: duplicated, never lost.
+// the remove leaves the note under both names: duplicated, never lost. If the
+// remove fails, the new name is dropped again (best effort).
 //
 // Filesystems without hard links (FAT, some FUSE and network mounts) fall
 // back to Lstat then rename. A target created in the few microseconds between
-// the two can then be overwritten: a known residual race, accepted because
-// only an external writer can trigger it on such a filesystem.
+// the two can then be overwritten: a known residual race. Callers lock the
+// paths, so in-process callers cannot trigger it; an external writer can.
 func (v *Vault) rename(src, dst string) error {
 	info, err := v.root.Lstat(filepath.FromSlash(src))
 	if err != nil {
@@ -47,8 +48,10 @@ func (v *Vault) rename(src, dst string) error {
 	switch {
 	case lerr == nil:
 		if err := v.root.Remove(lsrc); err != nil {
-			// The note now exists under both names; surface the failure
-			// rather than pretend the move completed.
+			// src still holds the inode, so dropping the new name loses
+			// nothing. Best effort: if this also fails the note stays under
+			// both names (duplicated, never lost).
+			_ = v.root.Remove(ldst)
 			return fsErr(err, src)
 		}
 	case linkUnsupported(lerr):
@@ -82,37 +85,46 @@ func (v *Vault) absent(p string) error {
 // Move renames a note and returns the notes that still link to the old
 // path. Links are reported, never rewritten: rewriting other notes is a
 // larger, riskier edit than the one requested.
-func (v *Vault) Move(from, to string) ([]string, error) {
+//
+// Once the note is moved, Move never returns an error: complete=false means
+// the backlink scan failed and stillLinking is unknown, but the move itself
+// succeeded, so a caller must not retry or report failure.
+func (v *Vault) Move(from, to string) (stillLinking []string, complete bool, err error) {
 	src, err := v.clean(from, accessMoveFrom, true)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	dst, err := v.clean(to, accessWrite, true)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if src == dst {
-		return nil, errf(CodeInvalidInput, "source and target are the same")
+		return nil, false, errf(CodeInvalidInput, "source and target are the same")
 	}
 	if err := v.noSymlinks(src); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := v.noSymlinks(dst); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	unlock := v.locks.lock(src, dst)
 	err = v.rename(src, dst)
 	unlock()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return v.Backlinks(src)
+	links, berr := v.backlinks(src)
+	if berr != nil {
+		return nil, false, nil
+	}
+	return links, true, nil
 }
 
 // Delete moves a note into .trash/, keeping its folder path so a restore
 // is obvious. A name clash in the trash gets a timestamp suffix, and a
 // counter when that name is taken too (two deletes in the same second). No
-// bytes are ever removed.
+// bytes are ever removed. A name close to NAME_MAX may fail on a second
+// clash because the suffix makes it too long: safe, nothing is lost.
 func (v *Vault) Delete(rel string) (string, error) {
 	p, err := v.clean(rel, accessWrite, true)
 	if err != nil {
@@ -127,12 +139,13 @@ func (v *Vault) Delete(rel string) (string, error) {
 	if err := v.noSymlinks(path.Dir(base)); err != nil {
 		return "", err
 	}
-	defer v.locks.lock(p, base)()
 	ext := path.Ext(base)
 	stem := strings.TrimSuffix(base, ext) + "." + v.now().UTC().Format("20060102T150405")
 	dst := base
 	for i := 1; i <= maxTrashAttempts; i++ {
+		unlock := v.locks.lock(p, dst)
 		err := v.rename(p, dst)
+		unlock()
 		if err == nil {
 			return dst, nil
 		}

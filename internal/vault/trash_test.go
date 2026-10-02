@@ -21,14 +21,14 @@ func TestMoveReportsBacklinksAndDoesNotRewriteThem(t *testing.T) {
 	v, dir := newTestVault(t, Options{})
 	writeFile(t, dir, "a.md", "A")
 	writeFile(t, dir, "b.md", "see [[a]]")
-	still, err := v.Move("a.md", "Archive/a.md")
+	still, complete, err := v.Move("a.md", "Archive/a.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if exists(dir, "a.md") || !exists(dir, "Archive/a.md") {
 		t.Fatal("note was not moved")
 	}
-	if !slices.Equal(still, []string{"b.md"}) || readFile(t, dir, "b.md") != "see [[a]]" {
+	if !complete || !slices.Equal(still, []string{"b.md"}) || readFile(t, dir, "b.md") != "see [[a]]" {
 		t.Fatalf("still linking = %v, b.md = %q", still, readFile(t, dir, "b.md"))
 	}
 	noTempFiles(t, dir)
@@ -39,19 +39,19 @@ func TestMoveErrors(t *testing.T) {
 	writeFile(t, dir, "a.md", "A")
 	writeFile(t, dir, "b.md", "B")
 	writeFile(t, dir, "Folder.md/x.md", "X")
-	_, err := v.Move("a.md", "b.md")
+	_, _, err := v.Move("a.md", "b.md")
 	wantCode(t, err, CodeExists)
-	_, err = v.Move("missing.md", "c.md")
+	_, _, err = v.Move("missing.md", "c.md")
 	wantCode(t, err, CodeNotFound)
-	_, err = v.Move("a.md", ".trash/a.md")
+	_, _, err = v.Move("a.md", ".trash/a.md")
 	wantCode(t, err, CodePathProtected)
-	_, err = v.Move("a.md", "a.md")
+	_, _, err = v.Move("a.md", "a.md")
 	wantCode(t, err, CodeInvalidInput)
-	_, err = v.Move("Folder.md", "c.md")
+	_, _, err = v.Move("Folder.md", "c.md")
 	wantCode(t, err, CodeInvalidPath)
-	_, err = v.Move("../a.md", "c.md")
+	_, _, err = v.Move("../a.md", "c.md")
 	wantCode(t, err, CodePathOutside)
-	_, err = v.Move("a.md", ".git/a.md")
+	_, _, err = v.Move("a.md", ".git/a.md")
 	wantCode(t, err, CodePathProtected)
 	if readFile(t, dir, "a.md") != "A" || readFile(t, dir, "b.md") != "B" {
 		t.Fatal("a failed move changed a note")
@@ -62,7 +62,7 @@ func TestMovePreservesContentExactly(t *testing.T) {
 	v, dir := newTestVault(t, Options{})
 	content := "---\r\ntitle: x\r\n---\nbody no trailing newline \xff"
 	writeFile(t, dir, "a.md", content)
-	if _, err := v.Move("a.md", "x/y/a.md"); err != nil {
+	if _, _, err := v.Move("a.md", "x/y/a.md"); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, dir, "x/y/a.md"); got != content {
@@ -74,7 +74,7 @@ func TestMovePreservesContentExactly(t *testing.T) {
 func TestRestoreFromTrash(t *testing.T) {
 	v, dir := newTestVault(t, Options{})
 	writeFile(t, dir, ".trash/old.md", "old")
-	if _, err := v.Move(".trash/old.md", "old.md"); err != nil {
+	if _, _, err := v.Move(".trash/old.md", "old.md"); err != nil {
 		t.Fatal(err)
 	}
 	if readFile(t, dir, "old.md") != "old" || exists(dir, ".trash/old.md") {
@@ -127,13 +127,13 @@ func TestMoveAndDeleteFallbackWithoutHardLinks(t *testing.T) {
 	v.link = noLink
 	writeFile(t, dir, "a.md", "A")
 	writeFile(t, dir, "b.md", "B")
-	if _, err := v.Move("a.md", "x/a.md"); err != nil {
+	if _, _, err := v.Move("a.md", "x/a.md"); err != nil {
 		t.Fatal(err)
 	}
 	if exists(dir, "a.md") || readFile(t, dir, "x/a.md") != "A" {
 		t.Fatal("fallback move failed")
 	}
-	_, err := v.Move("b.md", "x/a.md")
+	_, _, err := v.Move("b.md", "x/a.md")
 	wantCode(t, err, CodeExists)
 	if got, err := v.Delete("b.md"); err != nil || got != ".trash/b.md" || readFile(t, dir, got) != "B" {
 		t.Fatalf("Delete = %q, %v", got, err)
@@ -151,7 +151,7 @@ func TestMoveDoesNotClobberTargetCreatedAfterCheck(t *testing.T) {
 		}
 		return os.Link(filepath.Join(dir, old), filepath.Join(dir, nw))
 	}
-	_, err := v.Move("a.md", "t.md")
+	_, _, err := v.Move("a.md", "t.md")
 	wantCode(t, err, CodeExists)
 	if readFile(t, dir, "t.md") != "external" || readFile(t, dir, "a.md") != "A" {
 		t.Fatal("racing target was clobbered or source lost")
@@ -162,7 +162,7 @@ func TestMoveOtherLinkErrorIsReported(t *testing.T) {
 	v, dir := newTestVault(t, Options{})
 	writeFile(t, dir, "a.md", "A")
 	v.link = func(_, _ string) error { return &os.LinkError{Op: "link", Err: syscall.EIO} }
-	if _, err := v.Move("a.md", "b.md"); err == nil || !errors.Is(err, syscall.EIO) {
+	if _, _, err := v.Move("a.md", "b.md"); err == nil || !errors.Is(err, syscall.EIO) {
 		t.Fatalf("err = %v, want EIO", err)
 	}
 	if readFile(t, dir, "a.md") != "A" || exists(dir, "b.md") {
@@ -182,7 +182,7 @@ func TestMoveConcurrentExactlyOneWins(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, errs[i] = v.Move(fmt.Sprintf("s%d.md", i), "dst.md")
+			_, _, errs[i] = v.Move(fmt.Sprintf("s%d.md", i), "dst.md")
 		}()
 	}
 	wg.Wait()
@@ -203,5 +203,53 @@ func TestMoveConcurrentExactlyOneWins(t *testing.T) {
 	}
 	if wins != 1 {
 		t.Fatalf("%d moves won, want 1", wins)
+	}
+}
+
+func TestMoveBacklinkScanFailureStillReportsSuccess(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "a.md", "A")
+	v.backlinks = func(string) ([]string, error) { return []string{"junk.md"}, errors.New("walk failed") }
+	still, complete, err := v.Move("a.md", "b.md")
+	if err != nil || complete || still != nil {
+		t.Fatalf("Move = %v, %v, %v; want nil, false, nil", still, complete, err)
+	}
+	if exists(dir, "a.md") || readFile(t, dir, "b.md") != "A" {
+		t.Fatal("the move did not happen")
+	}
+}
+
+func TestMoveDenyFolderAndBadPaths(t *testing.T) {
+	v, dir := newTestVault(t, Options{Deny: []string{"Private"}})
+	writeFile(t, dir, "a.md", "A")
+	writeFile(t, dir, "Private/s.md", "S")
+	_, _, err := v.Move("a.md", "Private/a.md")
+	wantCode(t, err, CodePathProtected)
+	_, _, err = v.Move("Private/s.md", "s.md")
+	wantCode(t, err, CodePathProtected)
+	_, err = v.Delete("Private/s.md")
+	wantCode(t, err, CodePathProtected)
+	for _, bad := range []string{"../x.md", "/abs/x.md", "x\x00.md"} {
+		_, _, err = v.Move("a.md", bad)
+		if c := CodeOf(err); c != CodePathOutside && c != CodeInvalidPath {
+			t.Fatalf("Move target %q: %v", bad, err)
+		}
+		_, err = v.Delete(bad)
+		if c := CodeOf(err); c != CodePathOutside && c != CodeInvalidPath {
+			t.Fatalf("Delete %q: %v", bad, err)
+		}
+	}
+	if !exists(dir, "a.md") || !exists(dir, "Private/s.md") {
+		t.Fatal("a refused operation changed the vault")
+	}
+}
+
+func TestRestoreFromTrashReportsBacklinks(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, ".trash/old.md", "old")
+	writeFile(t, dir, "b.md", "see [[old]]")
+	still, complete, err := v.Move(".trash/old.md", "old.md")
+	if err != nil || !complete || !slices.Equal(still, []string{"b.md"}) {
+		t.Fatalf("Move = %v, %v, %v", still, complete, err)
 	}
 }

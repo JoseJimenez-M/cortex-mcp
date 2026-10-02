@@ -14,7 +14,7 @@ func TestMovePreservesMode(t *testing.T) {
 	if err := os.Chmod(filepath.Join(dir, "p.md"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.Move("p.md", "q/p.md"); err != nil {
+	if _, _, err := v.Move("p.md", "q/p.md"); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(filepath.Join(dir, "q", "p.md"))
@@ -42,13 +42,13 @@ func TestMoveAndDeleteRefuseSymlinks(t *testing.T) {
 	}
 	// Source is a symlinked note, source passes through a symlinked folder,
 	// target passes through a symlinked folder.
-	_, err := v.Move("link.md", "moved.md")
+	_, _, err := v.Move("link.md", "moved.md")
 	wantCode(t, err, CodeInvalidPath)
-	_, err = v.Move("destlink/keep.md", "moved.md")
+	_, _, err = v.Move("destlink/keep.md", "moved.md")
 	wantCode(t, err, CodeInvalidPath)
-	_, err = v.Move("real.md", "destlink/real.md")
+	_, _, err = v.Move("real.md", "destlink/real.md")
 	wantCode(t, err, CodeInvalidPath)
-	_, err = v.Move("real.md", "out/real.md")
+	_, _, err = v.Move("real.md", "out/real.md")
 	wantCode(t, err, CodeInvalidPath)
 	// Deleting a symlinked note, and deleting when .trash is a symlink.
 	_, err = v.Delete("link.md")
@@ -61,5 +61,24 @@ func TestMoveAndDeleteRefuseSymlinks(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
 		t.Fatalf("something was written outside the vault: %v", entries)
+	}
+}
+
+func TestMoveRemoveFailureRollsBackTarget(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "ro/a.md", "A")
+	if err := os.Chmod(filepath.Join(dir, "ro"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "ro"), 0o755) })
+	_, _, err := v.Move("ro/a.md", "out/a.md")
+	if err == nil {
+		t.Fatal("Move succeeded although the source could not be removed")
+	}
+	if !exists(dir, "ro/a.md") || exists(dir, "out/a.md") || readFile(t, dir, "ro/a.md") != "A" {
+		t.Fatal("note must exist only at the source after a failed move")
 	}
 }
