@@ -44,6 +44,8 @@ func TestParseHeadingsEdgeCases(t *testing.T) {
 			"---\r\na: b\r\n---\r\n# A\r\n```\r\n# c\r\n```\r\n## B ##\r\n", []heading{{3, 1, "A"}, {7, 2, "B"}}},
 		{"BOM before frontmatter",
 			"\uFEFF---\na: b\n# no\n---\n# A\n", []heading{{4, 1, "A"}}},
+		{"BOM on a heading in line 0",
+			"\uFEFF# A\n## B\n", []heading{{0, 1, "A"}, {1, 2, "B"}}},
 		{"blockquote is not a heading (unsupported)",
 			"> # quoted\n", nil},
 		{"unclosed frontmatter marker is just text",
@@ -153,7 +155,12 @@ func FuzzParseHeadings(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, s string) {
 		lines := strings.Split(s, "\n")
+		prev := -1
 		for _, h := range parseHeadings(lines) {
+			if h.line <= prev || strings.Contains(h.text, "\r") {
+				t.Fatalf("headings not increasing or text has CR: %+v for %q", h, s)
+			}
+			prev = h.line
 			if h.line < 0 || h.line >= len(lines) || h.level < 1 || h.level > 6 {
 				t.Fatalf("bad heading %+v for %q", h, s)
 			}

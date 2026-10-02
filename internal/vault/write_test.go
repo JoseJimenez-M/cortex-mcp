@@ -250,3 +250,21 @@ func TestLinkUnsupportedCoversErrUnsupported(t *testing.T) {
 		t.Fatalf("content = %q", got)
 	}
 }
+
+func TestWritesCannotExceedReadLimit(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	v.maxRead = 20
+	writeFile(t, dir, "a.md", "# A\nxxxxxxxx\n")
+	_, err := v.Append("a.md", strings.Repeat("y", 30))
+	wantCode(t, err, CodeTooLarge)
+	_, err = v.AppendToSection("a.md", "A", strings.Repeat("y", 30))
+	wantCode(t, err, CodeTooLarge)
+	if got := readFile(t, dir, "a.md"); got != "# A\nxxxxxxxx\n" {
+		t.Fatalf("file changed: %q", got)
+	}
+	_, err = v.Create("b.md", strings.Repeat("z", 21))
+	wantCode(t, err, CodeTooLarge)
+	if _, err := os.Stat(filepath.Join(dir, "b.md")); err == nil {
+		t.Fatal("b.md was created")
+	}
+}

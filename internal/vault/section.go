@@ -59,7 +59,13 @@ func parseHeadings(lines []string) []heading {
 	var fenceCh byte
 	fenceLen := 0
 	for i := bodyStart(lines); i < len(lines); i++ {
-		l := strings.TrimRight(lines[i], "\r")
+		// Cut at the first CR: it drops the CRLF terminator, and a bare CR
+		// (a legacy line ending) ends the line too, so heading text never
+		// contains one.
+		l, _, _ := strings.Cut(lines[i], "\r")
+		if i == 0 {
+			l = strings.TrimPrefix(l, "\uFEFF") // a BOM is not part of the first line's text
+		}
 		t := strings.TrimLeft(l, " ")
 		if len(l)-len(t) > 3 {
 			continue

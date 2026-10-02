@@ -153,6 +153,10 @@ func (v *Vault) Create(rel, content string) (string, error) {
 	if err := v.checkSize(len(content)); err != nil {
 		return "", err
 	}
+	// Keep the invariant explicit: a note we write must stay readable.
+	if int64(len(content)) > v.maxRead {
+		return "", errf(CodeTooLarge, "%s would be larger than %d bytes", p, v.maxRead)
+	}
 	defer v.locks.lock(p)()
 	if _, err := v.root.Lstat(filepath.FromSlash(p)); err == nil {
 		return "", errf(CodeExists, "%s already exists: use append or replace_section", p)
@@ -188,6 +192,10 @@ func (v *Vault) modify(rel, ver string, guarded bool, fn func(string) (string, e
 	out, err := fn(n.Content)
 	if err != nil {
 		return "", err
+	}
+	// Repeated appends must never grow a note past what read accepts.
+	if int64(len(out)) > v.maxRead {
+		return "", errf(CodeTooLarge, "%s would grow past %d bytes", p, v.maxRead)
 	}
 	data := []byte(out)
 	if err := v.writeAtomic(p, data); err != nil {
