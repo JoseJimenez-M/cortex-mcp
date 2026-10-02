@@ -34,9 +34,10 @@ cmd/cortex-mcp  ->  internal/cli  ->  internal/server  ->  internal/tools  ->  i
                                          |                     |
                                          +-> internal/tokens   +-> internal/logs
                     internal/config  (used by cli and server)
+                    internal/fsperm  (leaf: private dir/file modes, used by tokens and logs)
 ```
 
-Imports point down only. `internal/vault` imports nothing from this module. No package-level mutable
+Imports point down only. `internal/vault`, `internal/config`, and `internal/fsperm` import nothing from this module. No package-level mutable
 state except `server.Version` (set by the linker).
 
 ## Invariants: never break these
