@@ -61,6 +61,34 @@ func (v *Vault) clean(rel string, a access, wantMD bool) (string, error) {
 	return p, nil
 }
 
+// noSymlinks refuses a cleaned path when any existing segment from the root
+// down is a symbolic link. The vault never follows symlinks: protection is
+// checked on the lexical path, so a link inside the vault could otherwise
+// alias a denied or protected path (Lib/x.md -> ../Private/p.md). Missing
+// segments are fine (a note about to be created). os.Root stays the second
+// line of defence against links that leave the vault. Call it right after
+// clean in every method that touches an existing path.
+func (v *Vault) noSymlinks(p string) error {
+	if p == "." {
+		return nil
+	}
+	segs := strings.Split(p, "/")
+	for i := range segs {
+		prefix := strings.Join(segs[:i+1], "/")
+		info, err := v.root.Lstat(filepath.FromSlash(prefix))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return fsErr(err, prefix)
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return errf(CodeInvalidPath, "%s is or passes through a symbolic link; symlinks are not followed", p)
+		}
+	}
+	return nil
+}
+
 // protectedErr is the single definition of which cleaned, slash-separated
 // paths are off limits: neverAccessible names at any depth, the top-level
 // trash for writes, and the operator's deny list. Everything folds case with

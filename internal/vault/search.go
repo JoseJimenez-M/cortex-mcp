@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Entry is one item of a folder listing.
@@ -51,10 +52,11 @@ func isTrash(p string) bool {
 	return foldEq(strings.SplitN(p, "/", 2)[0], trashDir)
 }
 
-// visible applies hidden, except that the trash is shown when the folder
-// being walked is not the vault root: clean already accepted that folder,
-// and it can then only be the trash or inside it. Never-accessible names
-// and deny entries stay hidden even there.
+// visible applies hidden, except when walking a folder other than the vault
+// root: clean already accepted that folder, so the trash can only be shown
+// because the folder is the trash or inside it (an ordinary folder cannot
+// contain the top-level trash). Never-accessible names and deny entries stay
+// hidden there too.
 func (v *Vault) visible(p, folder string) bool {
 	if folder == "." {
 		return !v.hidden(p)
@@ -67,20 +69,13 @@ func isNote(name string) bool {
 }
 
 // noteInfo returns the metadata of a listed or walked entry when it is a
-// regular note file. A symlink is resolved through os.Root, so one that
-// leaves the vault, dangles, or points at a folder is dropped here and never
-// shows up in listings, searches or Recent.
-func (v *Vault) noteInfo(p string, d fs.DirEntry) (fs.FileInfo, bool) {
-	if d.IsDir() || !isNote(d.Name()) {
+// regular note file. The vault never follows symlinks (see noSymlinks), so a
+// symlinked note is skipped here: d.Info is an Lstat and reports the link.
+func noteInfo(d fs.DirEntry) (fs.FileInfo, bool) {
+	if !d.Type().IsRegular() || !isNote(d.Name()) {
 		return nil, false
 	}
-	var info fs.FileInfo
-	var err error
-	if d.Type()&fs.ModeSymlink != 0 {
-		info, err = v.root.Stat(filepath.FromSlash(p))
-	} else {
-		info, err = d.Info()
-	}
+	info, err := d.Info()
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, false
 	}
@@ -93,6 +88,13 @@ func (v *Vault) noteInfo(p string, d fs.DirEntry) (fs.FileInfo, bool) {
 func (v *Vault) walk(folder string, fn func(p string, info fs.FileInfo) error) error {
 	return fs.WalkDir(v.root.FS(), folder, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// An unreadable entry must not abort the whole scan.
+			if p != folder && errors.Is(err, fs.ErrPermission) {
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			return fsErr(err, p)
 		}
 		if p != folder && !v.visible(p, folder) {
@@ -101,7 +103,10 @@ func (v *Vault) walk(folder string, fn func(p string, info fs.FileInfo) error) e
 			}
 			return nil
 		}
-		info, ok := v.noteInfo(p, d)
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil // never followed, file or folder
+		}
+		info, ok := noteInfo(d)
 		if !ok {
 			return nil
 		}
@@ -122,6 +127,21 @@ func (v *Vault) readForScan(p string) (*Note, bool, error) {
 	return n, true, nil
 }
 
+// checkFolder verifies that cleaned path f is an existing real folder.
+func (v *Vault) checkFolder(f string) error {
+	if err := v.noSymlinks(f); err != nil {
+		return err
+	}
+	info, err := v.root.Stat(filepath.FromSlash(f))
+	if err != nil {
+		return fsErr(err, f)
+	}
+	if !info.IsDir() {
+		return errf(CodeInvalidPath, "%s is not a folder", f)
+	}
+	return nil
+}
+
 // List returns a folder's notes and subfolders, or every note below it
 // when recursive.
 func (v *Vault) List(folder string, recursive bool) ([]Entry, error) {
@@ -129,12 +149,8 @@ func (v *Vault) List(folder string, recursive bool) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := fs.Stat(v.root.FS(), f)
-	if err != nil {
-		return nil, fsErr(err, f)
-	}
-	if !info.IsDir() {
-		return nil, errf(CodeInvalidPath, "%s is not a folder", f)
+	if err := v.checkFolder(f); err != nil {
+		return nil, err
 	}
 	var out []Entry
 	if recursive {
@@ -153,9 +169,12 @@ func (v *Vault) List(folder string, recursive bool) ([]Entry, error) {
 		if !v.visible(p, f) {
 			continue
 		}
+		if e.Type()&fs.ModeSymlink != 0 {
+			continue
+		}
 		if e.IsDir() {
 			out = append(out, Entry{Path: p, Folder: true})
-		} else if _, ok := v.noteInfo(p, e); ok {
+		} else if _, ok := noteInfo(e); ok {
 			out = append(out, Entry{Path: p})
 		}
 	}
@@ -180,6 +199,9 @@ func (v *Vault) Search(query, folder string, limit int) ([]Hit, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := v.checkFolder(f); err != nil {
+		return nil, err
+	}
 	var hits []Hit
 	err = v.walk(f, func(p string, _ fs.FileInfo) error {
 		n, ok, err := v.readForScan(p)
@@ -187,8 +209,11 @@ func (v *Vault) Search(query, folder string, limit int) ([]Hit, error) {
 			return err
 		}
 		for i, line := range strings.Split(n.Content, "\n") {
-			if strings.Contains(strings.ToLower(line), q) {
-				hits = append(hits, Hit{Path: p, Line: i + 1, Snippet: snippet(line, 200)})
+			lower := strings.ToLower(line)
+			if idx := strings.Index(lower, q); idx >= 0 {
+				// ToLower maps rune to rune, so rune offsets agree.
+				at := utf8.RuneCountInString(lower[:idx])
+				hits = append(hits, Hit{Path: p, Line: i + 1, Snippet: snippet(line, at)})
 				if len(hits) >= limit {
 					return errStop
 				}
@@ -202,12 +227,31 @@ func (v *Vault) Search(query, folder string, limit int) ([]Hit, error) {
 	return hits, err
 }
 
-func snippet(s string, maxRunes int) string {
-	s = strings.TrimSpace(s)
-	if r := []rune(s); len(r) > maxRunes {
-		return string(r[:maxRunes]) + "..."
+// snippet returns at most snippetRunes runes of line, starting snippetBefore
+// runes before the match (at rune offset matchRune) so the match stays
+// visible on very long lines. It never converts the whole line to runes.
+func snippet(line string, matchRune int) string {
+	const snippetRunes, snippetBefore = 200, 80
+	start := max(0, matchRune-snippetBefore)
+	b := 0
+	for i := 0; i < start && b < len(line); i++ {
+		_, w := utf8.DecodeRuneInString(line[b:])
+		b += w
 	}
-	return s
+	rest := line[b:]
+	end := 0
+	for n := 0; n < snippetRunes && end < len(rest); n++ {
+		_, w := utf8.DecodeRuneInString(rest[end:])
+		end += w
+	}
+	out := strings.TrimSpace(rest[:end])
+	if start > 0 {
+		out = "..." + out
+	}
+	if end < len(rest) {
+		out += "..."
+	}
+	return out
 }
 
 // SearchTag returns notes tagged with tag, in frontmatter `tags` or inline
@@ -264,7 +308,7 @@ func (v *Vault) Recent(since time.Time) ([]RecentNote, error) {
 		}
 		return nil
 	})
-	slices.SortFunc(out, func(a, b RecentNote) int { return b.Modified.Compare(a.Modified) })
+	slices.SortStableFunc(out, func(a, b RecentNote) int { return b.Modified.Compare(a.Modified) })
 	return out, err
 }
 
@@ -272,6 +316,9 @@ func (v *Vault) Recent(since time.Time) ([]RecentNote, error) {
 func (v *Vault) Backlinks(rel string) ([]string, error) {
 	target, err := v.clean(rel, accessRead, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := v.noSymlinks(target); err != nil {
 		return nil, err
 	}
 	noExt := strings.TrimSuffix(target, path.Ext(target))

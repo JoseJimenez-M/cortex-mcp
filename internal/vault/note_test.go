@@ -72,12 +72,12 @@ func TestReadRefusesSymlinksLeavingTheVault(t *testing.T) {
 		t.Skip("symlinks not supported here:", err)
 	}
 	_, err := v.Read("link.md")
-	wantCode(t, err, CodePathOutside)
+	wantCode(t, err, CodeInvalidPath)
 	if err := os.Symlink(outside, filepath.Join(dir, "out")); err != nil {
 		t.Fatal(err)
 	}
 	_, err = v.Read("out/secret.md")
-	wantCode(t, err, CodePathOutside)
+	wantCode(t, err, CodeInvalidPath)
 }
 
 func TestReadFrontmatterWithNonStringKeysIsJSONSafe(t *testing.T) {

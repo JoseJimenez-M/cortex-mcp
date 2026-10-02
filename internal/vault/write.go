@@ -157,6 +157,9 @@ func (v *Vault) Create(rel, content string) (string, error) {
 	if int64(len(content)) > v.maxRead {
 		return "", errf(CodeTooLarge, "%s would be larger than %d bytes", p, v.maxRead)
 	}
+	if err := v.noSymlinks(p); err != nil {
+		return "", err
+	}
 	defer v.locks.lock(p)()
 	if _, err := v.root.Lstat(filepath.FromSlash(p)); err == nil {
 		return "", errf(CodeExists, "%s already exists: use append or replace_section", p)

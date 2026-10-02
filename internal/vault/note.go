@@ -37,6 +37,9 @@ func (v *Vault) Read(rel string) (*Note, error) {
 
 // read loads a path already validated by clean.
 func (v *Vault) read(p string) (*Note, error) {
+	if err := v.noSymlinks(p); err != nil {
+		return nil, err
+	}
 	local := filepath.FromSlash(p)
 	// Check before opening: opening a FIFO blocks until a writer appears.
 	pre, err := v.root.Stat(local)

@@ -17,6 +17,10 @@ from the vault or a lost note. Read the root `AGENTS.md` first.*
   `CodeChanged` when it is stale. Additive edits (`Create`, `Append*`) are the only unguarded writes.
 - **Errors:** return `errf(Code..., ...)` for anything the assistant can act on; map filesystem errors
   with `fsErr`. Messages use vault-relative paths only.
+- **Symlinks are never followed.** Protection is checked on the lexical path, so a link inside the vault
+  could alias a denied path. Call `v.noSymlinks(p)` right after `clean` in every method that touches an
+  existing path (`read` and `Create` do; folder operations use `checkFolder`). Walks skip symlink entries.
+  `os.Root` stays the second line of defence against links leaving the vault.
 - **Protected paths** (`neverAccessible`, `trashDir`, `deny`) are enforced in `clean` and again by
   `hidden`/`visible` in walks. A new operation must respect both.
 - **Name folding** goes through `fold`/`foldEq` (fold.go) everywhere, locks included. Unicode normalization (NFC vs NFD) is not folded: a known limit.

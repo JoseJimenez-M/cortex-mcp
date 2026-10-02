@@ -1,8 +1,10 @@
 package vault
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -278,7 +280,132 @@ func TestSymlinkedOutsideNotesNotExposed(t *testing.T) {
 		t.Fatalf("Recent = %+v", rc)
 	}
 	_, err = v.List("linkdir", true)
-	if err == nil {
-		t.Fatal("List of a symlinked outside folder succeeded")
+	wantCode(t, err, CodeInvalidPath)
+}
+
+func TestInVaultSymlinksAreNeverFollowed(t *testing.T) {
+	v, dir := newTestVault(t, Options{Deny: []string{"Private"}})
+	writeFile(t, dir, "Private/p.md", "needle #tagx")
+	writeFile(t, dir, ".git/HEAD.md", "needle #tagx")
+	writeFile(t, dir, "Real/n.md", "needle #tagx")
+	writeFile(t, dir, "Lib/ok.md", "needle [[Real/n]]")
+	links := map[string]string{
+		"Lib/x.md":        "../Private/p.md",
+		"Lib/gitlink":     "../.git",
+		"Lib/privlink":    "../Private",
+		"Alias":           "Real",
+		"Lib/realnote.md": "../Real/n.md",
+	}
+	for l, target := range links {
+		if err := os.Symlink(target, filepath.Join(dir, filepath.FromSlash(l))); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+	}
+	for _, p := range []string{"Lib/x.md", "Lib/gitlink/HEAD.md", "Lib/privlink/p.md", "Alias/n.md", "Lib/realnote.md"} {
+		_, err := v.Read(p)
+		wantCode(t, err, CodeInvalidPath)
+	}
+	for _, f := range []string{"Lib/gitlink", "Alias", "Lib/privlink"} {
+		_, err := v.List(f, false)
+		wantCode(t, err, CodeInvalidPath)
+		_, err = v.Search("needle", f, 0)
+		wantCode(t, err, CodeInvalidPath)
+	}
+	es, err := v.List(".", true)
+	if err != nil || !slices.Equal(listPaths(es), []string{"Lib/ok.md", "Real/n.md"}) {
+		t.Fatalf("List recursive = %v, %v", es, err)
+	}
+	es, _ = v.List("Lib", false)
+	if !slices.Equal(listPaths(es), []string{"Lib/ok.md"}) {
+		t.Fatalf("List Lib = %v", es)
+	}
+	hits, _ := v.Search("needle", "", 0)
+	if len(hits) != 2 {
+		t.Fatalf("Search = %+v", hits)
+	}
+	tg, _ := v.SearchTag("tagx")
+	if !slices.Equal(tg, []string{"Real/n.md"}) {
+		t.Fatalf("SearchTag = %v", tg)
+	}
+	rc, _ := v.Recent(time.Now().Add(-time.Hour))
+	if len(rc) != 2 {
+		t.Fatalf("Recent = %+v", rc)
+	}
+	bl, _ := v.Backlinks("Real/n.md")
+	if !slices.Equal(bl, []string{"Lib/ok.md"}) {
+		t.Fatalf("Backlinks = %v", bl)
+	}
+	_, err = v.Backlinks("Alias/n.md")
+	wantCode(t, err, CodeInvalidPath)
+}
+
+func TestSnippetShowsMatchOnHugeLine(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "big.md", strings.Repeat("é", 1_000_000)+" the NEEDLE here"+strings.Repeat("x", 5000))
+	hits, err := v.Search("needle", "", 0)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("Search = %+v, %v", hits, err)
+	}
+	s := hits[0].Snippet
+	if !strings.Contains(s, "NEEDLE") || !strings.HasPrefix(s, "...") || !strings.HasSuffix(s, "...") {
+		t.Fatalf("snippet = %q", s)
+	}
+	if n := len([]rune(s)); n > 206 {
+		t.Fatalf("snippet has %d runes", n)
+	}
+}
+
+func TestRecentTiesKeepLexicalOrder(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	same := time.Now().Add(-time.Minute)
+	var want []string
+	for i := range 60 {
+		p := fmt.Sprintf("n%02d.md", i)
+		writeFile(t, dir, p, "x")
+		if err := os.Chtimes(filepath.Join(dir, p), same, same); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, p)
+	}
+	got, err := v.Recent(same.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, r := range got {
+		paths = append(paths, r.Path)
+	}
+	if !slices.Equal(paths, want) {
+		t.Fatalf("Recent order = %v", paths)
+	}
+}
+
+func TestSearchFolderMustBeFolder(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "a.md", "needle")
+	_, err := v.Search("needle", "a.md", 0)
+	wantCode(t, err, CodeInvalidPath)
+	_, err = v.Search("needle", "nope", 0)
+	wantCode(t, err, CodeNotFound)
+}
+
+func TestWalksSkipPermissionDenied(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs an unprivileged unix user")
+	}
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "a.md", "needle")
+	writeFile(t, dir, "locked/b.md", "needle")
+	locked := filepath.Join(dir, "locked")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	hits, err := v.Search("needle", "", 0)
+	if err != nil || len(hits) != 1 || hits[0].Path != "a.md" {
+		t.Fatalf("Search = %+v, %v", hits, err)
+	}
+	if _, err := v.Recent(time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("Recent: %v", err)
 	}
 }
