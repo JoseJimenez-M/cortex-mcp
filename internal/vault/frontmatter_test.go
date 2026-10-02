@@ -84,3 +84,185 @@ func TestParseFrontmatterNonFiniteFloatsAreJSONSafe(t *testing.T) {
 		t.Fatalf("not JSON-safe: %v (%#v)", err, m)
 	}
 }
+
+func TestSetFrontmatterMergesAndKeepsOrderAndComments(t *testing.T) {
+	in := "---\ntype: note # kind of page\nstatus: draft\ntags: [kind/note, topic/dev]\ncreated: 2026-10-01\n---\n# Body\n"
+	out, err := setFrontmatter(in, map[string]any{
+		"status":  "active",
+		"updated": "2026-10-02",
+		"tags":    []any{"kind/note", "topic/tech"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "---\ntype: note # kind of page\nstatus: active\ntags: [kind/note, topic/tech]\ncreated: 2026-10-01\nupdated: 2026-10-02\n---\n# Body\n"
+	if out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestSetFrontmatterRemovesAddsAndQuotesWhenNeeded(t *testing.T) {
+	out, err := setFrontmatter("# Body\n", map[string]any{"type": "note", "flag": "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "---\nflag: \"true\"\ntype: note\n---\n# Body\n" {
+		t.Fatalf("got %q", out)
+	}
+	out, err = setFrontmatter("---\na: 1\nb: 2\n---\nx", map[string]any{"a": nil})
+	if err != nil || out != "---\nb: 2\n---\nx" {
+		t.Fatalf("remove: got %q, %v", out, err)
+	}
+	out, err = setFrontmatter("---\na: 1\n---\nx", map[string]any{"a": nil})
+	if err != nil || out != "x" {
+		t.Fatalf("remove last key: got %q, %v", out, err)
+	}
+}
+
+func TestSetFrontmatterRejectsNonMapping(t *testing.T) {
+	_, err := setFrontmatter("---\n- a\n---\n", map[string]any{"x": 1})
+	wantCode(t, err, CodeBadFrontmatter)
+}
+
+func TestSetFrontmatterKeepsLineEndingsAndBOM(t *testing.T) {
+	out, err := setFrontmatter("\uFEFF---\r\na: 1\r\n---\r\nbody\r\n", map[string]any{"b": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "\uFEFF---\r\na: 1\r\nb: x\r\n---\r\nbody\r\n"; out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+	// No frontmatter yet: the BOM stays first, the block follows it.
+	out, err = setFrontmatter("\uFEFF# T\n", map[string]any{"a": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "\uFEFF---\na: 1\n---\n# T\n"; out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+func TestSetFrontmatterNeverTouchesBody(t *testing.T) {
+	body := "# T\n---\nnot: frontmatter\n---\r\n\ttabs  \n\n---"
+	out, err := setFrontmatter("---\na: 1\n---\n"+body, map[string]any{"a": 2, "b": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(out, "\n---\n"+body) {
+		t.Fatalf("body changed: %q", out)
+	}
+}
+
+func TestSetFrontmatterRemovingAllKeysKeepsBodyABody(t *testing.T) {
+	// A body that opens with a fence must not become frontmatter.
+	in := "---\na: 1\n---\n---\nb: 2\n---\nx"
+	out, err := setFrontmatter(in, map[string]any{"a": nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, ok, err := splitFrontmatter(out)
+	if err != nil || !ok || body != "---\nb: 2\n---\nx" {
+		t.Fatalf("out %q: body %q ok %v err %v", out, body, ok, err)
+	}
+}
+
+func TestSetFrontmatterValueShapes(t *testing.T) {
+	out, err := setFrontmatter("---\na: 1\n---\n", map[string]any{
+		"nested": map[string]any{"k": []any{"x", map[string]any{"d": "2026-01-02"}}},
+		"a b":    "c: d",
+		"true":   1,
+		"multi":  "l1\nl2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := parseFrontmatter(out)
+	if err != nil {
+		t.Fatalf("result does not parse: %v\n%s", err, out)
+	}
+	if m["a b"] != "c: d" || m["multi"] != "l1\nl2" || m["true"] != 1 {
+		t.Fatalf("m = %#v\n%s", m, out)
+	}
+	if n, _ := m["nested"].(map[string]any); n == nil || n["k"] == nil {
+		t.Fatalf("nested lost: %#v", m)
+	}
+}
+
+func TestSetFrontmatterAnchorsAndAliases(t *testing.T) {
+	in := "---\nbase: &b {x: 1}\nuse: *b\nother: &o 5\n---\nbody"
+	// Changing an unrelated key keeps anchors and aliases as written.
+	out, err := setFrontmatter(in, map[string]any{"new": "v"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "---\nbase: &b {x: 1}\nuse: *b\nother: &o 5\nnew: v\n---\nbody"; out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+	// Removing or replacing an anchor that an alias still uses would write
+	// an invalid document: refuse instead of corrupting the note.
+	for _, f := range []map[string]any{{"base": nil}, {"base": "z"}} {
+		_, err = setFrontmatter(in, f)
+		wantCode(t, err, CodeBadFrontmatter)
+	}
+}
+
+func TestSetFrontmatterRejectsMultipleDocuments(t *testing.T) {
+	_, err := setFrontmatter("---\na: 1\n--- \nb: 2\n---\nx", map[string]any{"c": 1})
+	wantCode(t, err, CodeBadFrontmatter)
+}
+
+func FuzzSetFrontmatter(f *testing.F) {
+	for _, s := range []string{"", "x", "---\na: 1\n---\nb", "---\n---\n---\nz: 1\n---\n", "\uFEFF---\r\nx: &a 1\r\ny: *a\r\n---\r\nq", "---\n- a\n---\n"} {
+		f.Add(s, "k", "v", false)
+		f.Add(s, "a", "2026-10-02", true)
+	}
+	f.Fuzz(func(t *testing.T, content, key, val string, remove bool) {
+		var fields map[string]any
+		if remove {
+			fields = map[string]any{key: nil}
+		} else {
+			fields = map[string]any{key: val, "tags": []any{val}}
+		}
+		out, err := setFrontmatter(content, fields)
+		if err != nil {
+			return
+		}
+		_, wantBody, ok, serr := splitFrontmatter(content)
+		if serr != nil {
+			t.Fatalf("setFrontmatter accepted unsplittable input %q", content)
+		}
+		if !ok {
+			wantBody = strings.TrimPrefix(content, "\uFEFF")
+		}
+		_, gotBody, gok, err := splitFrontmatter(out)
+		if err != nil {
+			t.Fatalf("result %q does not split: %v", out, err)
+		}
+		if gok {
+			if _, err := parseFrontmatter(out); err != nil {
+				t.Fatalf("result %q frontmatter does not parse: %v", out, err)
+			}
+		} else {
+			gotBody = strings.TrimPrefix(out, "\uFEFF")
+		}
+		if gotBody != wantBody {
+			t.Fatalf("body changed: %q -> %q (out %q)", wantBody, gotBody, out)
+		}
+	})
+}
+
+func TestUpdateFrontmatterOnVault(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	writeFile(t, dir, "a.md", "---\nstatus: draft\n---\nbody\n")
+	_, err := v.UpdateFrontmatter("a.md", map[string]any{}, "x")
+	wantCode(t, err, CodeInvalidInput)
+	n, _ := v.Read("a.md")
+	if _, err := v.UpdateFrontmatter("a.md", map[string]any{"status": "done"}, n.Version); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, dir, "a.md"); got != "---\nstatus: done\n---\nbody\n" {
+		t.Fatalf("content = %q", got)
+	}
+	_, err = v.UpdateFrontmatter("a.md", map[string]any{"status": "x"}, n.Version)
+	wantCode(t, err, CodeChanged)
+}

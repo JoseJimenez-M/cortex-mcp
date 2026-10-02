@@ -1,8 +1,15 @@
 package vault
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"math"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -94,4 +101,150 @@ func stringifyDates(v any) any {
 		}
 	}
 	return v
+}
+
+var dateLike = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// valueNode encodes one frontmatter value. Date-shaped strings get an
+// untagged plain node so they are written as 2026-10-02, not "2026-10-02".
+func valueNode(val any) (*yaml.Node, error) {
+	if s, ok := val.(string); ok && dateLike.MatchString(s) {
+		return &yaml.Node{Kind: yaml.ScalarNode, Value: s}, nil
+	}
+	n := &yaml.Node{}
+	if err := n.Encode(val); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+// decodeFrontmatterNode parses y into a node tree. Node decoding keeps
+// anchors and aliases as written, so nothing is expanded. A second YAML
+// document is refused: rewriting would silently drop it.
+func decodeFrontmatterNode(y string) (yaml.Node, error) {
+	var doc yaml.Node
+	dec := yaml.NewDecoder(strings.NewReader(y))
+	if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
+		return doc, errf(CodeBadFrontmatter, "frontmatter is not valid YAML: %v", err)
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return doc, errf(CodeBadFrontmatter, "frontmatter holds more than one YAML document")
+	}
+	return doc, nil
+}
+
+// setFrontmatter merges fields into the note's frontmatter. Existing keys
+// keep their position, comments, and flow style; new keys are appended in
+// sorted order; a nil value removes the key. The body is never modified.
+// A leading BOM stays first, and the rewritten block keeps the line ending
+// style of the opening "---" line (LF when the note has no frontmatter).
+func setFrontmatter(content string, fields map[string]any) (string, error) {
+	y, body, ok, err := splitFrontmatter(content)
+	if err != nil {
+		return "", err
+	}
+	bom := ""
+	if strings.HasPrefix(content, "\uFEFF") {
+		bom = "\uFEFF"
+		if !ok {
+			body = strings.TrimPrefix(body, bom)
+		}
+	}
+	eol := "\n"
+	if ok && strings.HasPrefix(strings.TrimPrefix(content, bom), "---\r\n") {
+		eol = "\r\n"
+	}
+	var doc yaml.Node
+	if ok && strings.TrimSpace(y) != "" {
+		if doc, err = decodeFrontmatterNode(y); err != nil {
+			return "", err
+		}
+	}
+	var m *yaml.Node
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) == 1 {
+		m = doc.Content[0]
+	} else {
+		m = &yaml.Node{Kind: yaml.MappingNode}
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{m}}
+	}
+	if m.Kind != yaml.MappingNode {
+		return "", errf(CodeBadFrontmatter, "frontmatter must be a YAML mapping")
+	}
+	for _, k := range slices.Sorted(maps.Keys(fields)) {
+		i := -1
+		for j := 0; j+1 < len(m.Content); j += 2 {
+			if kn := m.Content[j]; kn.Kind == yaml.ScalarNode && kn.Value == k {
+				i = j
+				break
+			}
+		}
+		if fields[k] == nil {
+			if i >= 0 {
+				m.Content = slices.Delete(m.Content, i, i+2)
+			}
+			continue
+		}
+		vn, err := valueNode(fields[k])
+		if err != nil {
+			return "", errf(CodeBadFrontmatter, "field %q: %v", k, err)
+		}
+		if i >= 0 {
+			if m.Content[i+1].Style&yaml.FlowStyle != 0 && vn.Kind == yaml.SequenceNode {
+				vn.Style = yaml.FlowStyle
+			}
+			m.Content[i+1] = vn
+			continue
+		}
+		// Encode the key too, so one that needs quoting ("true", "a: b")
+		// is quoted.
+		kn := &yaml.Node{}
+		if err := kn.Encode(k); err != nil {
+			return "", errf(CodeBadFrontmatter, "field %q: %v", k, err)
+		}
+		m.Content = append(m.Content, kn, vn)
+	}
+	if len(m.Content) == 0 {
+		// A body that itself opens with a fence would be read as the
+		// frontmatter once ours is gone: keep an empty block in front.
+		if _, _, bok, berr := splitFrontmatter(body); bok || berr != nil {
+			return bom + "---" + eol + "---" + eol + body, nil
+		}
+		return bom + body, nil
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		return "", errf(CodeBadFrontmatter, "cannot encode frontmatter: %v", err)
+	}
+	if err := enc.Close(); err != nil {
+		return "", errf(CodeBadFrontmatter, "cannot encode frontmatter: %v", err)
+	}
+	// Removing or replacing an anchored value that an alias still uses
+	// yields text that no longer parses: refuse rather than corrupt the note.
+	if _, err := decodeFrontmatterNode(buf.String()); err != nil {
+		return "", errf(CodeBadFrontmatter, "the update would leave the frontmatter invalid (a removed or replaced anchor is still referenced?)")
+	}
+	block := buf.String()
+	if eol != "\n" {
+		block = strings.ReplaceAll(block, "\n", eol)
+	}
+	return bom + "---" + eol + block + "---" + eol + body, nil
+}
+
+// UpdateFrontmatter merges fields into a note's frontmatter without
+// touching its body. Requires the version from the caller's last read.
+func (v *Vault) UpdateFrontmatter(rel string, fields map[string]any, ver string) (string, error) {
+	if len(fields) == 0 {
+		return "", errf(CodeInvalidInput, "no fields to update")
+	}
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		return "", errf(CodeInvalidInput, "fields are not serialisable: %v", err)
+	}
+	if err := v.checkSize(len(raw)); err != nil {
+		return "", err
+	}
+	return v.modify(rel, ver, true, func(c string) (string, error) { return setFrontmatter(c, fields) })
 }
