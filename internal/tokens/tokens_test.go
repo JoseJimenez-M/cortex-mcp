@@ -163,11 +163,11 @@ func TestOpenTightensExistingPermissions(t *testing.T) {
 		t.Skip("unix permissions only")
 	}
 	dir := filepath.Join(t.TempDir(), "state")
-	if err := os.Mkdir(dir, 0o755); err != nil { //nolint:gosec // deliberately loose to test tightening
+	if err := os.Mkdir(dir, 0o755); err != nil { // #nosec G301 -- deliberately loose to test tightening
 		t.Fatal(err)
 	}
 	p := filepath.Join(dir, "auth.db")
-	if err := os.WriteFile(p, nil, 0o644); err != nil { //nolint:gosec // deliberately loose to test tightening
+	if err := os.WriteFile(p, nil, 0o644); err != nil { // #nosec G306 -- deliberately loose to test tightening
 		t.Fatal(err)
 	}
 	s, err := Open(p)
@@ -329,7 +329,7 @@ func TestOpenRefusesSharedStateDir(t *testing.T) {
 		t.Skip("unix permissions only")
 	}
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil { //nolint:gosec // simulates /tmp
+	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil { // #nosec G302 -- simulates a shared /tmp
 		t.Fatal(err)
 	}
 	s, err := Open(filepath.Join(dir, "auth.db"))

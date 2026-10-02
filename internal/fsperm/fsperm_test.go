@@ -29,11 +29,11 @@ func TestUnixModes(t *testing.T) {
 		t.Skip("unix permissions only")
 	}
 	dir := filepath.Join(t.TempDir(), "state")
-	if err := os.Mkdir(dir, 0o755); err != nil { //nolint:gosec // deliberately loose
+	if err := os.Mkdir(dir, 0o755); err != nil { // #nosec G301 -- deliberately loose
 		t.Fatal(err)
 	}
 	f := filepath.Join(dir, "f")
-	if err := os.WriteFile(f, nil, 0o644); err != nil { //nolint:gosec // deliberately loose
+	if err := os.WriteFile(f, nil, 0o644); err != nil { // #nosec G306 -- deliberately loose
 		t.Fatal(err)
 	}
 	if err := PrivateDir(dir); err != nil {
@@ -59,7 +59,7 @@ func TestSharedDirsAreRefused(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := os.Chmod(dir, mode); err != nil { //nolint:gosec // simulates a shared dir
+			if err := os.Chmod(dir, mode); err != nil { // #nosec G302 -- simulates a shared dir
 				t.Fatal(err)
 			}
 			err := PrivateDir(dir)

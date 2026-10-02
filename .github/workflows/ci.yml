@@ -16,6 +16,10 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go mod tidy
+        run: go mod tidy && git diff --exit-code go.mod go.sum
       - name: vet
         run: go vet ./...
       - name: test

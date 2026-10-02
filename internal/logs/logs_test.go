@@ -353,7 +353,7 @@ func TestOpenRefusesSharedDir(t *testing.T) {
 		t.Skip("unix permissions only")
 	}
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil { //nolint:gosec // simulates /tmp
+	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil { // #nosec G302 -- simulates a shared /tmp
 		t.Fatal(err)
 	}
 	l, err := Open(dir, 1024, 2)
