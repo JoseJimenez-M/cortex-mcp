@@ -93,7 +93,7 @@ func TestFieldIsCappedAtRuneBoundary(t *testing.T) {
 	}
 }
 
-func TestHugePathRoundTrips(t *testing.T) {
+func TestHugeFieldIsCappedAndReadable(t *testing.T) {
 	dir := t.TempDir()
 	l, _ := Open(dir, 1<<20, 1)
 	must(t, l.Write(Entry{Time: time.Now(), Client: "c", Tool: "t", Path: strings.Repeat("x", 200000), Result: "ok"}))
@@ -280,5 +280,70 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWriteKeepsEntryWhenRotationFails(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := Open(dir, 100, 2)
+	// A non-empty directory in the oldest slot makes the rotation's Remove fail
+	// (also as root).
+	slot := filepath.Join(dir, "writes.log.2")
+	must(t, os.MkdirAll(filepath.Join(slot, "x"), 0o700))
+	var failed error
+	for i := range 5 {
+		if err := l.Write(Entry{Time: time.Now(), Client: "c", Tool: "t", Path: fmt.Sprintf("n%d", i), Result: "ok"}); err != nil {
+			failed = err
+			if !strings.Contains(readFile0(t, dir), fmt.Sprintf("n%d", i)) {
+				t.Fatalf("entry n%d dropped despite rotation error", i)
+			}
+		}
+	}
+	if failed == nil {
+		t.Fatal("expected a rotation error to be reported")
+	}
+	must(t, l.Close())
+}
+
+func readFile0(t *testing.T, dir string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "writes.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestReadSinceIsInclusiveWithinTheSecond(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := Open(dir, 1<<20, 1)
+	t0 := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	must(t, l.Write(Entry{Time: t0.Add(400 * time.Millisecond), Tool: "t"}))
+	must(t, l.Close())
+	got, _ := ReadSince(dir, t0.Add(700*time.Millisecond))
+	if len(got) != 1 {
+		t.Fatalf("entry in the same second as since was dropped: %+v", got)
+	}
+}
+
+func TestOpenTightensExistingPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits")
+	}
+	dir := filepath.Join(t.TempDir(), "logs")
+	must(t, os.Mkdir(dir, 0o755))
+	must(t, os.Chmod(dir, 0o755))
+	f := filepath.Join(dir, "writes.log")
+	must(t, os.WriteFile(f, nil, 0o644))
+	must(t, os.Chmod(f, 0o644))
+	l, err := Open(dir, 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, l.Close())
+	for p, want := range map[string]os.FileMode{dir: 0o700, f: 0o600} {
+		if info, _ := os.Stat(p); info.Mode().Perm() != want {
+			t.Errorf("%s mode = %v, want %v", p, info.Mode().Perm(), want)
+		}
 	}
 }

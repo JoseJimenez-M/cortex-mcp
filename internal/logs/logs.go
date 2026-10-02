@@ -65,6 +65,11 @@ func Open(dir string, maxBytes int64, keep int) (*Logger, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// MkdirAll leaves an existing directory as it was; tighten it, and report
+	// failure rather than run with a world-readable log.
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory needs the owner x bit; 0700 is the tightest usable mode
+		return nil, err
+	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
@@ -78,6 +83,11 @@ func Open(dir string, maxBytes int64, keep int) (*Logger, error) {
 		}
 	}
 	if err := l.open(); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if err := l.f.Chmod(0o600); err != nil { // an existing file keeps its old mode otherwise
+		_ = l.f.Close()
 		_ = root.Close()
 		return nil, err
 	}
@@ -107,7 +117,7 @@ func field(s string) string {
 	if s == "" {
 		return "-"
 	}
-	s = strings.ToValidUTF8(s, "�")
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	s = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return ' '
@@ -144,14 +154,18 @@ func (l *Logger) Write(e Entry) error {
 	}
 	// size > 0 guarantees progress: an empty file is never rotated, so an
 	// oversized entry cannot cause an endless rotate loop.
+	var rotErr error
 	if l.size > 0 && l.size+int64(len(line)) > l.maxBytes {
-		if err := l.rotate(); err != nil {
-			return err
+		rotErr = l.rotate()
+		if l.f == nil { // could not reopen: nowhere to write
+			return rotErr
 		}
 	}
+	// A rotation error is reported, but the entry is still written: losing
+	// audit data because housekeeping failed would be worse.
 	n, err := l.f.WriteString(line)
 	l.size += int64(n)
-	return err
+	return errors.Join(rotErr, err)
 }
 
 // rotate shifts writes.log.N up by one, drops the oldest beyond keep, and
@@ -173,7 +187,7 @@ func (l *Logger) rotate() error {
 	}
 	step(l.root.Rename(fileName, rot(1)))
 	if oerr := l.open(); oerr != nil {
-		return oerr
+		return errors.Join(err, oerr)
 	}
 	return err
 }
@@ -228,8 +242,9 @@ func rotatedNames(root *os.Root) ([]rotated, error) {
 
 // ReadSince returns entries at or after since, oldest first, across the
 // current and rotated files. Malformed and over-long lines are skipped.
-// Timestamps have second precision, so an entry from the same second as
-// since may compare as earlier. A missing dir yields no entries.
+// Timestamps have second precision, and since is compared at second precision, so same-second entries are included.
+// A missing dir yields no entries. It takes no lock, so a concurrent rotation
+// can make it miss or duplicate entries: it is a best-effort report view.
 func ReadSince(dir string, since time.Time) ([]Entry, error) {
 	root, err := os.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -266,6 +281,7 @@ func readFile(root *os.Root, name string, since time.Time) ([]Entry, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	since = since.Truncate(time.Second)
 	var out []Entry
 	r := bufio.NewReaderSize(f, 4096)
 	for {
