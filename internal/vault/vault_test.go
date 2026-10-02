@@ -63,3 +63,12 @@ func TestNewRejectsInvalidDenyEntries(t *testing.T) {
 		t.Errorf("valid deny entries rejected: %v", err)
 	}
 }
+
+func readFile(t *testing.T, dir, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}

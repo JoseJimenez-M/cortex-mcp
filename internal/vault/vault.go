@@ -26,6 +26,7 @@ type Vault struct {
 	maxWrite int64
 	maxRead  int64
 	now      func() time.Time
+	locks    lockMap
 }
 
 // New opens dir as a vault. dir must exist.
