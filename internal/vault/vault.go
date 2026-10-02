@@ -23,7 +23,6 @@ type Vault struct {
 	root     *os.Root
 	deny     []string
 	maxWrite int64
-	locks    lockMap
 	now      func() time.Time
 }
 

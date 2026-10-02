@@ -28,15 +28,6 @@ func writeFile(t *testing.T, dir, rel, content string) {
 	}
 }
 
-func readFile(t *testing.T, dir, rel string) string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
 func wantCode(t *testing.T, err error, code Code) {
 	t.Helper()
 	if got := CodeOf(err); got != code {
