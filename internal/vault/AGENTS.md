@@ -19,6 +19,7 @@ from the vault or a lost note. Read the root `AGENTS.md` first.*
   with `fsErr`. Messages use vault-relative paths only.
 - **Protected paths** (`neverAccessible`, `trashDir`, `deny`) are enforced in `clean` and again by
   `hidden`/`visible` in walks. A new operation must respect both.
+- **Name folding** goes through `fold`/`foldEq` (fold.go) everywhere, locks included. Unicode normalization (NFC vs NFD) is not folded: a known limit.
 
 ## Tests a new operation must have
 
@@ -27,4 +28,3 @@ from the vault or a lost note. Read the root `AGENTS.md` first.*
 3. A symlink pointing outside the vault is refused (`CodePathOutside`).
 4. For writes: no `.cortex-tmp-*` file left behind; concurrent calls with `-race` keep every change.
 5. A fuzz target if it parses untrusted text.
-- **Name folding** goes through `fold`/`foldEq` (fold.go) everywhere, locks included. Unicode normalization (NFC vs NFD) is not folded: a known limit.
