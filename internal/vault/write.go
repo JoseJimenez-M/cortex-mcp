@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // stage writes data to a fresh temp file next to p, fsynced and closed, and
@@ -21,11 +22,31 @@ func (v *Vault) stage(p string, data []byte) (string, error) {
 		}
 	}
 	tmp := path.Join(dir, ".cortex-tmp-"+rand.Text())
-	f, err := v.root.OpenFile(filepath.FromSlash(tmp), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
+	// A rewrite must not silently change the note's permissions (a 0600
+	// private note must not become 0644); new notes get 0644.
+	mode := fs.FileMode(0o644)
+	if info, err := v.root.Stat(filepath.FromSlash(p)); err == nil && info.Mode().IsRegular() {
+		mode = info.Mode().Perm()
+	}
+	if err := v.writeFileExcl(tmp, data, mode); err != nil {
 		return "", fsErr(err, p)
 	}
-	_, werr := f.Write(data)
+	return tmp, nil
+}
+
+// writeFileExcl creates name (it must not exist), writes data, fsyncs and
+// closes. On any failure after the create it removes only the file it made.
+// The mode is applied with chmod so the umask cannot alter it.
+func (v *Vault) writeFileExcl(name string, data []byte, mode fs.FileMode) error {
+	local := filepath.FromSlash(name)
+	f, err := v.root.OpenFile(local, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	werr := f.Chmod(mode)
+	if werr == nil {
+		_, werr = f.Write(data)
+	}
 	if werr == nil {
 		werr = f.Sync()
 	}
@@ -33,10 +54,20 @@ func (v *Vault) stage(p string, data []byte) (string, error) {
 		werr = cerr
 	}
 	if werr != nil {
-		_ = v.root.Remove(filepath.FromSlash(tmp))
-		return "", fsErr(werr, p)
+		_ = v.root.Remove(local)
 	}
-	return tmp, nil
+	return werr
+}
+
+// linkUnsupported reports whether err means the filesystem cannot make this
+// hard link (as opposed to a real failure such as EEXIST or EIO).
+func linkUnsupported(err error) bool {
+	for _, e := range []error{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.ENOSYS, syscall.EXDEV, syscall.EMLINK} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
 }
 
 // syncDir flushes the folder entry so the rename or link survives a power
@@ -53,7 +84,9 @@ func (v *Vault) syncDir(p string) {
 
 // writeAtomic replaces p with data: write a temp file in the same folder,
 // fsync, rename over the target. A crash leaves the old note or the new
-// one, never a partial file, and sync tools never see half a note.
+// one, never a partial file, and sync tools never see half a note. Parent
+// folders created by MkdirAll are not fsynced: durability is best effort by
+// design.
 func (v *Vault) writeAtomic(p string, data []byte) error {
 	tmp, err := v.stage(p, data)
 	if err != nil {
@@ -67,24 +100,31 @@ func (v *Vault) writeAtomic(p string, data []byte) error {
 	return nil
 }
 
-// writeNew atomically publishes data at p only if p does not exist. rename
-// would silently replace a file that an external process (Obsidian, a sync
-// tool) created after Create's existence check, and the vault lock does not
-// cover those processes. link(2) fails with EEXIST instead, atomically, and
-// the temp name is then dropped. Trade-off: this needs hard-link support on
-// the vault's filesystem (ext4, xfs, btrfs, APFS, NTFS have it; FAT does
-// not), and a failure there is reported rather than falling back to an
-// overwrite-capable rename.
+// writeNew publishes data at p only if p does not exist. rename would
+// silently replace a file that an external process (Obsidian, a sync tool)
+// created after Create's existence check, and the vault lock does not cover
+// those processes. The preferred path is link(2) of a fully written temp
+// file: atomic, fails with EEXIST, and readers never see a partial note.
+// Filesystems without hard links (FAT, some FUSE and network mounts) fall
+// back to creating the target with O_EXCL and writing in place: it still
+// never clobbers, but a sync tool may briefly see a partial NEW note, and a
+// crash mid-write can leave a truncated new note (nothing existing is lost).
 func (v *Vault) writeNew(p string, data []byte) error {
 	tmp, err := v.stage(p, data)
 	if err != nil {
 		return err
 	}
-	lerr := v.root.Link(filepath.FromSlash(tmp), filepath.FromSlash(p))
-	// The temp name is dropped on both paths; after a successful link the
+	lerr := v.link(filepath.FromSlash(tmp), filepath.FromSlash(p))
+	// The temp name is dropped on every path; after a successful link the
 	// note is already complete under its real name.
 	_ = v.root.Remove(filepath.FromSlash(tmp))
-	if lerr != nil {
+	switch {
+	case lerr == nil:
+	case linkUnsupported(lerr):
+		if err := v.writeFileExcl(p, data, 0o644); err != nil {
+			return fsErr(err, p)
+		}
+	default:
 		return fsErr(lerr, p)
 	}
 	v.syncDir(p)

@@ -70,3 +70,25 @@ func TestLockDifferentKeysDoNotBlock(t *testing.T) {
 		t.Fatal("lock(b.md) blocked while a.md was held")
 	}
 }
+
+func TestLockFoldsCase(t *testing.T) {
+	var l lockMap
+	unlock := l.lock("A.md")
+	got := make(chan struct{})
+	go func() {
+		u := l.lock("a.md")
+		close(got)
+		u()
+	}()
+	select {
+	case <-got:
+		t.Fatal("a.md acquired while A.md was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("a.md never acquired")
+	}
+}

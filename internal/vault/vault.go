@@ -27,6 +27,9 @@ type Vault struct {
 	maxRead  int64
 	now      func() time.Time
 	locks    lockMap
+	// link is the hard-link primitive; a field so tests can simulate
+	// filesystems without hard links.
+	link func(oldname, newname string) error
 }
 
 // New opens dir as a vault. dir must exist.
@@ -53,7 +56,9 @@ func New(dir string, opts Options) (*Vault, error) {
 		}
 		deny = append(deny, d)
 	}
-	return &Vault{root: r, deny: deny, maxWrite: maxWrite, maxRead: maxNoteBytes, now: time.Now}, nil
+	v := &Vault{root: r, deny: deny, maxWrite: maxWrite, maxRead: maxNoteBytes, now: time.Now}
+	v.link = r.Link
+	return v, nil
 }
 
 // Close releases the vault's directory handle.

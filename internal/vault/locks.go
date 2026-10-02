@@ -2,6 +2,7 @@ package vault
 
 import (
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -29,7 +30,12 @@ func (l *lockMap) get(key string) *sync.Mutex {
 // lock locks every key in sorted order, so two moves over the same pair of
 // notes can never deadlock, and returns the unlock function.
 func (l *lockMap) lock(keys ...string) func() {
-	ks := slices.Clone(keys)
+	// Folded so "A.md" and "a.md" share a mutex on case-insensitive
+	// filesystems; on case-sensitive ones it only over-serializes.
+	ks := make([]string, len(keys))
+	for i, k := range keys {
+		ks[i] = strings.ToLower(k)
+	}
 	slices.Sort(ks)
 	ks = slices.Compact(ks)
 	mus := make([]*sync.Mutex, len(ks))

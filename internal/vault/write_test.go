@@ -1,12 +1,14 @@
 package vault
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -96,10 +98,13 @@ func TestWritesLeaveNoTempFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if strings.HasPrefix(d.Name(), ".cortex-tmp-") {
 			t.Errorf("temp file left behind: %s", p)
 		}
-		return err
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -147,5 +152,88 @@ func TestWriteAtomicFailureLeavesNoTempFile(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".cortex-tmp-") {
 			t.Errorf("temp file left behind: %s", e.Name())
 		}
+	}
+}
+
+func noTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(d.Name(), ".cortex-tmp-") {
+			t.Errorf("temp file left behind: %s", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteNewFallbackWhenLinkUnsupported(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	v.link = func(_, _ string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
+	if err := v.writeNew("sub/n.md", []byte("exact\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, dir, "sub/n.md"); got != "exact\n" {
+		t.Fatalf("content = %q", got)
+	}
+	writeFile(t, dir, "e.md", "original")
+	wantCode(t, v.writeNew("e.md", []byte("new")), CodeExists)
+	if got := readFile(t, dir, "e.md"); got != "original" {
+		t.Fatalf("existing note was changed to %q", got)
+	}
+	noTempFiles(t, dir)
+}
+
+func TestWriteNewOtherLinkErrorsAreReported(t *testing.T) {
+	v, dir := newTestVault(t, Options{})
+	v.link = func(_, _ string) error { return &os.LinkError{Op: "link", Err: syscall.EIO} }
+	if err := v.writeNew("n.md", []byte("x")); err == nil || !errors.Is(err, syscall.EIO) {
+		t.Fatalf("err = %v, want EIO", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "n.md")); err == nil {
+		t.Fatal("note was created despite the error")
+	}
+	noTempFiles(t, dir)
+}
+
+func TestWriteNewConcurrentExactlyOneWins(t *testing.T) {
+	for _, forceFallback := range []bool{false, true} {
+		v, dir := newTestVault(t, Options{})
+		if forceFallback {
+			v.link = func(_, _ string) error { return &os.LinkError{Op: "link", Err: syscall.ENOTSUP} }
+		}
+		const n = 20
+		errs := make([]error, n)
+		var wg sync.WaitGroup
+		for i := range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs[i] = v.writeNew("race.md", []byte(fmt.Sprintf("payload %d", i)))
+			}()
+		}
+		wg.Wait()
+		winner := -1
+		for i, err := range errs {
+			if err == nil {
+				if winner != -1 {
+					t.Fatalf("fallback=%v: two writers succeeded", forceFallback)
+				}
+				winner = i
+				continue
+			}
+			wantCode(t, err, CodeExists)
+		}
+		if winner == -1 {
+			t.Fatalf("fallback=%v: no writer succeeded", forceFallback)
+		}
+		if got := readFile(t, dir, "race.md"); got != fmt.Sprintf("payload %d", winner) {
+			t.Fatalf("fallback=%v: content = %q, winner %d", forceFallback, got, winner)
+		}
+		noTempFiles(t, dir)
 	}
 }
