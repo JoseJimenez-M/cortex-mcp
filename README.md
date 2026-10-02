@@ -56,6 +56,11 @@ file but never change, move, or delete it.
   assistant cannot fill a shared disk; the rate limit bounds requests, not bytes.
 - Every route except `GET /healthz` requires a Bearer token. Tokens are random, shown once, and stored
   only as hashes in `state_dir/auth.db`. Requests are rate limited per client.
+- An MCP session is bound to the token that opened it, not to the token's name: after `token revoke`, a
+  new token created with the same name cannot use the old token's sessions.
+- Each token can hold at most 16 live sessions (normal clients use 1 or 2). Opening one more gets
+  `429 Too Many Requests` with `Retry-After`; a slot frees when a client ends its session or the session
+  times out.
 - `state_dir` must not be inside the vault and must not be a shared directory such as `/tmp`.
 - Sessions with no client POST for 30 minutes are closed. The instructions file is re-read at most every
   5 seconds.

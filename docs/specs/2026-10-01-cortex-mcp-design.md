@@ -115,6 +115,10 @@ reads (prompt injection). Every write tool is either additive or reversible from
 
 Sessions that receive no client POST for 30 minutes are closed (the SDK's session timeout counts POST
 requests), so clients that disappear without ending their session do not pin memory on the shared VPS.
+Each token holds at most 16 live sessions: a request that would open one more gets `429` with
+`Retry-After`, and existing sessions keep working. Without the cap a token within its rate limit could
+hold about 1,800 sessions (60 a minute for 30 minutes); normal clients use 1 or 2. A slot frees when the
+session ends (DELETE, idle timeout, or failed initialization).
 On shutdown the server cancels every request context, so open event streams end at once instead of
 holding the drain.
 
@@ -192,7 +196,9 @@ The server is its own authorization server (one less service to run):
 ### 6.3 Bearer tokens (optional)
 For clients that cannot run a browser login (a CLI agent, scripts, cron). Created with
 `cortex-mcp token create <name>`, shown once, stored as a hash, revocable. Disabled entirely with
-`bearer_tokens: false`.
+`bearer_tokens: false`. Each token row has a random id that is never reused, and MCP sessions are bound
+to that id rather than to the name: a token re-created under a revoked name cannot reach the old
+token's sessions. The name stays the client label in logs and the rate limit key.
 
 ### 6.4 Client management
 `cortex-mcp clients list` and `cortex-mcp clients revoke <name>` cover both OAuth clients and Bearer
