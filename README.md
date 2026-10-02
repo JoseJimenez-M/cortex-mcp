@@ -37,22 +37,42 @@ There is no shell, no git, and no hard delete. Guarded edits use a per-note vers
 fails with `note_changed` instead of overwriting a newer one. Every write is appended to
 `state_dir/writes.log` with the client name of the token that made it.
 
-If `instructions_file` is set, its content is sent to every assistant on connect.
+If `instructions_file` is set, its content is sent to every assistant on connect. Tools can read that
+file but never change, move, or delete it.
 
 ## Security model
 
 - All file access goes through `os.Root` in `internal/vault`; every path is cleaned and confined to the
   vault. The vault never follows symbolic links: a path that is or passes through one is refused.
+  Paths over 1024 bytes, or with a segment over 255 bytes, are refused.
 - `.git`, `.obsidian`, and `.cortex-mcp` are off limits at any depth. `.trash` is receive-only
-  (`delete_note` writes there; reads and moves out are allowed). `deny` adds more.
-- Writes are atomic (temp file, fsync, rename) and serialized per note.
+  (`delete_note` writes there; reads and moves out are allowed). `deny` adds more, and each entry also
+  protects the same path below `.trash/` (`delete_note` keeps the folder path). Obsidian's own trash
+  flattens paths, which no entry can match: if you use `deny`, consider adding `.trash` to it.
+- The `instructions_file` is read-only for tools: an assistant cannot rewrite the rules that every other
+  assistant receives.
+- Writes are atomic (temp file, fsync, rename) and serialized per note. Writes are refused with
+  `disk_low` while the vault's filesystem has less than 1 GiB free (Linux and macOS), so a looping
+  assistant cannot fill a shared disk; the rate limit bounds requests, not bytes.
 - Every route except `GET /healthz` requires a Bearer token. Tokens are random, shown once, and stored
   only as hashes in `state_dir/auth.db`. Requests are rate limited per client.
 - `state_dir` must not be inside the vault and must not be a shared directory such as `/tmp`.
-- Sessions with no request for 30 minutes are closed. The instructions file is re-read at most every
+- Sessions with no client POST for 30 minutes are closed. The instructions file is re-read at most every
   5 seconds.
+- The default `listen` is `127.0.0.1:8080`. `serve` warns when `public_url` is https and `listen` is not
+  loopback, because the plain HTTP port would then bypass the TLS proxy (in a container, `:8080` is
+  expected).
 - Tool errors are short stable codes; host paths and internals never reach the client. Note content is
-  treated as data and never interpreted.
+  treated as data and never interpreted by the server.
+- Notes are written with mode 0644 filtered by the umask. For a private vault, keep the vault root at
+  0700 or run the service with `UMask=0077`.
+- Assistants can write anything a note may contain, including code blocks that Obsidian plugins execute
+  (`dataviewjs`, Templater). If those plugins are enabled, that code runs in your Obsidian with its
+  permissions the next time you open the note. Review assistant-written notes, or keep such plugins off.
+- Linux on ext4 (case-sensitive) is the supported target. On case-insensitive filesystems, name folding
+  has documented limits: Unicode normalization (NFC vs NFD) is not folded, and NTFS case rules (such as
+  the Turkish dotless i) differ from the Unicode simple folding the server uses, so two spellings the
+  filesystem treats as one name may not match a `deny` entry.
 
 ## Quick start
 
@@ -85,8 +105,8 @@ startup with a message naming the key.
 
 ## Behind a reverse proxy
 
-The server speaks plain HTTP. For anything beyond localhost, bind it to `127.0.0.1` and terminate TLS
-in a reverse proxy. Set `public_url` to the public https URL. A generic Caddy example:
+The server speaks plain HTTP. For anything beyond localhost, keep the default `listen: 127.0.0.1:8080`
+and terminate TLS in a reverse proxy. Set `public_url` to the public https URL. A generic Caddy example:
 
 ```
 mcp.example.com {

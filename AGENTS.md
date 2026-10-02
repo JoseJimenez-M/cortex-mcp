@@ -30,11 +30,13 @@ is missing, search for it (`grep -rn`), never assume. The design source of truth
 ## Architecture and dependency rule
 
 ```
-cmd/cortex-mcp  ->  internal/cli  ->  internal/server  ->  internal/tools  ->  internal/vault
-                                         |                     |
-                                         +-> internal/tokens   +-> internal/logs
-                    internal/config  (used by cli and server)
-                    internal/fsperm  (leaf: private dir/file modes, used by tokens and logs)
+cmd/cortex-mcp   ->  internal/cli
+internal/cli     ->  server, vault, logs, tokens, config
+internal/server  ->  tools, vault, logs, tokens, config
+internal/tools   ->  vault, logs
+internal/tokens  ->  internal/fsperm
+internal/logs    ->  internal/fsperm
+internal/config, internal/vault, internal/fsperm: leaves
 ```
 
 Imports point down only. `internal/vault`, `internal/config`, and `internal/fsperm` import nothing from this module. No package-level mutable

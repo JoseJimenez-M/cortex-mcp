@@ -11,6 +11,7 @@ root `AGENTS.md` first.*
 - **Order of middleware on `/mcp`:** auth, then rate limit (it keys on the authenticated client), then
   the MCP handler. Do not reorder.
 - **Never log** the `Authorization` header, a token, or `TokenInfo` contents beyond the client name.
+- **Log only through `Options.Logger`** (and `tools.Deps.Logger`), never the global `slog` functions.
 - **`TokenInfo.UserID` is the client name**, so the SDK binds each MCP session to the token that opened
   it. Keep it unique per client.
 - **`DisableLocalhostProtection`** is only set when `public_url` is not localhost (behind a reverse

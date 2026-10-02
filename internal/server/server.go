@@ -42,7 +42,7 @@ const (
 	// only when a session opens, so rebuilding each time would re-read the
 	// file and re-register every tool per request.
 	instructionsTTL = 5 * time.Second
-	// idleSessionTimeout closes sessions that see no request for this long:
+	// idleSessionTimeout closes sessions that see no client POST for this long:
 	// clients that vanish without DELETE would otherwise pin memory forever
 	// on a small shared VPS. No config key yet.
 	idleSessionTimeout = 30 * time.Minute
