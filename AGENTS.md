@@ -74,6 +74,11 @@ Direct dependencies are limited to: `github.com/modelcontextprotocol/go-sdk`, `g
 `modernc.org/sqlite`, `golang.org/x/time`. Adding one needs the owner's approval and a line here with
 the reason. Prefer the standard library.
 
+Bumping `github.com/modelcontextprotocol/go-sdk` (including Dependabot PRs) must re-run the
+session-cap tests in `internal/server` and re-check the two SDK behaviours the cap relies on: the
+last `getServer` call is the server a new session connects to, and the initialize response carries
+`Mcp-Session-Id` (see `internal/server/sessions.go`).
+
 ## Workflow
 
 - **TDD, always:** write the failing test, see it fail for the right reason, write the minimum code,
