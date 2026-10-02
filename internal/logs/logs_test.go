@@ -347,3 +347,25 @@ func TestOpenTightensExistingPermissions(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenRefusesSharedDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permissions only")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil { //nolint:gosec // simulates /tmp
+		t.Fatal(err)
+	}
+	l, err := Open(dir, 1024, 2)
+	if err == nil {
+		_ = l.Close()
+		t.Fatal("Open accepted a shared directory")
+	}
+	if !strings.Contains(err.Error(), "shared directory") {
+		t.Errorf("error = %v", err)
+	}
+	info, _ := os.Stat(dir)
+	if info.Mode()&os.ModeSticky == 0 || info.Mode().Perm() != 0o777 {
+		t.Errorf("shared dir mode changed to %v", info.Mode())
+	}
+}

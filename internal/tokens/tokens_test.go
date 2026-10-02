@@ -245,6 +245,8 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	if s2, err := Open(p); err == nil {
 		_ = s2.Close()
 		t.Fatal("Open accepted a database from a newer version")
+	} else if !strings.Contains(err.Error(), "schema version") {
+		t.Fatalf("error does not mention the schema version: %v", err)
 	}
 }
 
@@ -319,5 +321,49 @@ func TestConcurrentDuplicateCreate(t *testing.T) {
 	wg.Wait()
 	if ok != 1 || exists != 7 {
 		t.Fatalf("ok=%d exists=%d, want 1 and 7", ok, exists)
+	}
+}
+
+func TestOpenRefusesSharedStateDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permissions only")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil { //nolint:gosec // simulates /tmp
+		t.Fatal(err)
+	}
+	s, err := Open(filepath.Join(dir, "auth.db"))
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("Open accepted a shared directory")
+	}
+	if !strings.Contains(err.Error(), "shared directory") {
+		t.Errorf("error = %v", err)
+	}
+	info, _ := os.Stat(dir)
+	if info.Mode()&os.ModeSticky == 0 || info.Mode().Perm() != 0o777 {
+		t.Errorf("shared dir mode changed to %v", info.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "auth.db")); err == nil {
+		t.Error("database created in a shared directory")
+	}
+}
+
+func TestOpenRequiresAbsolutePath(t *testing.T) {
+	if s, err := Open("auth.db"); err == nil {
+		_ = s.Close()
+		t.Fatal("Open accepted a relative path")
+	}
+}
+
+func TestPragmas(t *testing.T) {
+	s, _ := open(t)
+	var bt int
+	var jm string
+	if err := s.db.QueryRow(`PRAGMA busy_timeout`).Scan(&bt); err != nil || bt != 5000 {
+		t.Errorf("busy_timeout = %d, %v", bt, err)
+	}
+	if err := s.db.QueryRow(`PRAGMA journal_mode`).Scan(&jm); err != nil || jm != "wal" {
+		t.Errorf("journal_mode = %q, %v", jm, err)
 	}
 }

@@ -66,16 +66,17 @@ type Store struct {
 // Open creates the database if needed. The state directory is 0700 and the
 // database and its WAL/SHM side files are 0600 from the moment they exist.
 func Open(path string) (*Store, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
+	// Absolute only: a relative path would make the chmod below land on
+	// whatever the working directory happens to be.
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("tokens: open %s: path must be absolute", path)
 	}
-	if err := preparePath(abs); err != nil {
-		return nil, err
+	if err := preparePath(path); err != nil {
+		return nil, fmt.Errorf("tokens: open %s: %w", path, err)
 	}
-	db, err := sql.Open("sqlite", dsn(abs))
+	db, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("tokens: open %s: %w", path, err)
 	}
 	// One connection is the simplest correct choice for SQLite here: the
 	// load is a handful of lookups per minute, and it serializes writers
@@ -83,7 +84,7 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	if err := migrate(db); err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("tokens: open %s: %w", path, err)
 	}
 	return &Store{db: db, now: time.Now}, nil
 }
@@ -96,6 +97,13 @@ func preparePath(path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
+	}
+	// Never chmod a directory other users share (/tmp, a world-writable
+	// mount): that would change it for everyone, or fail confusingly.
+	if info, err := os.Stat(dir); err != nil {
+		return err
+	} else if m := info.Mode(); m&os.ModeSticky != 0 || m.Perm()&0o002 != 0 {
+		return fmt.Errorf("state dir %s is a shared directory; use a dedicated one", dir)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory needs the execute bit; 0700 is owner-only
 		return err

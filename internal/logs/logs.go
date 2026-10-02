@@ -65,6 +65,12 @@ func Open(dir string, maxBytes int64, keep int) (*Logger, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// Never chmod a directory other users share (/tmp, a world-writable mount).
+	if info, err := os.Stat(dir); err != nil {
+		return nil, err
+	} else if m := info.Mode(); m&os.ModeSticky != 0 || m.Perm()&0o002 != 0 {
+		return nil, fmt.Errorf("state dir %s is a shared directory; use a dedicated one", dir)
+	}
 	// MkdirAll leaves an existing directory as it was; tighten it, and report
 	// failure rather than run with a world-readable log.
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory needs the owner x bit; 0700 is the tightest usable mode
