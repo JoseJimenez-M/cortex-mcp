@@ -100,6 +100,7 @@ func (g *registrar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many registrations, try again later")
 		return
 	}
+	g.store.sweep() // clients that never completed a grant free their slots here too
 	now := g.store.now()
 	row := clientRow{ID: rand.Text(), Kind: kindDCR, Name: reg.ClientName, RedirectURIs: reg.RedirectURIs, Created: now}
 	switch err := g.store.registerDCR(row, maxUnusedDCR, authRequestTTL); {

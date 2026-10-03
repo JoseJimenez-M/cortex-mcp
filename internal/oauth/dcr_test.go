@@ -229,3 +229,49 @@ func FuzzParseRegistration(f *testing.F) {
 		}
 	})
 }
+
+// An attacker alone is limited by the registration rate. For a 503 the table
+// must be full of clients younger than authRequestTTL, so what the limiter
+// admits within that window has to stay below the cap.
+func TestRegistrationRateCannotFillTheTableWithYoungClients(t *testing.T) {
+	s, _ := newTestStore(t)
+	l := newRegistrar(s, defaultAllowlist(t)).limit
+	window := int(float64(l.Limit()) * authRequestTTL.Seconds())
+	if l.Burst()+window >= maxUnusedDCR {
+		t.Fatalf("burst %d + rate over %v (%d) must stay below maxUnusedDCR (%d)", l.Burst(), authRequestTTL, window, maxUnusedDCR)
+	}
+}
+
+func TestOwnerApprovedLoginIsNotEvicted(t *testing.T) {
+	s, clk := newTestStore(t)
+	seedUnused(t, s, maxUnusedDCR, clk.Now())
+	clk.Advance(authRequestTTL + time.Minute)
+	// The owner approved a login for the oldest client a moment ago.
+	if err := s.createAuthRequest(&authRequest{ID: "R1", ClientID: "U0000", CSRF: "c", Family: "F", Browser: "b", Created: clk.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.completeAuthRequest("R1", "otp"); err != nil {
+		t.Fatal(err)
+	}
+	// A pending (unapproved) request on the next one pins nothing.
+	if err := s.createAuthRequest(&authRequest{ID: "R2", ClientID: "U0001", CSRF: "c", Family: "G", Browser: "b", Created: clk.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := postRegister(t, newRegistrar(s, defaultAllowlist(t)), "application/json", `{"redirect_uris":["http://127.0.0.1/callback"]}`); rec.Code != http.StatusCreated {
+		t.Fatalf("registration: %d", rec.Code)
+	}
+	if _, err := s.clientByID("U0000"); err != nil {
+		t.Fatalf("client with an approved login was evicted: %v", err)
+	}
+	if _, err := s.clientByID("U0001"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("client with only a pending request survived: %v", err)
+	}
+	// Once the approval itself is older than the TTL it protects nothing.
+	clk.Advance(authRequestTTL)
+	if rec, _ := postRegister(t, newRegistrar(s, defaultAllowlist(t)), "application/json", `{"redirect_uris":["http://127.0.0.1/callback"]}`); rec.Code != http.StatusCreated {
+		t.Fatalf("registration: %d", rec.Code)
+	}
+	if _, err := s.clientByID("U0000"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired approval still pins its client: %v", err)
+	}
+}

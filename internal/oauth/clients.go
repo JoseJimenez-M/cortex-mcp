@@ -48,9 +48,19 @@ func (s *Store) saveCIMD(c clientRow) error {
 	return err
 }
 
-// authRequestTTL is how long an authorization request (and so a login in
-// progress for a client) stays valid. A client younger than this may still
-// be mid-login, so registration never evicts it.
+// authRequestTTL is how long an authorization request stays valid. It is
+// also the minimum age of a never-used DCR client before registration may
+// evict it.
+//
+// Trade-off: a login in progress for a DCR client older than this can be
+// lost when registrations churn the table, because the client row and its
+// requests are evicted. That is deliberate. Exempting every client with an
+// open request would let an attacker pin slots by opening requests, since
+// /authorize is unauthenticated. The one exemption is a request the owner
+// has already approved (done = 1, see registerDCR): only the owner can
+// produce that state. dcr_test.go asserts that an attacker alone, limited
+// by the registration rate, can never fill the table with clients younger
+// than this and so cannot cause 503s.
 const authRequestTTL = 10 * time.Minute
 
 // errRegistryFull means the never-used client table is full and nothing in
@@ -61,7 +71,8 @@ var errRegistryFull = errors.New("client registry full")
 // never-used clients (no grant) count against maxUnused. When full, the
 // oldest never-used client created at least minAge ago is evicted to make
 // room; if there is none, errRegistryFull. Clients with grants are never
-// counted or evicted.
+// counted or evicted, and neither is one whose login the owner has approved
+// within the last authRequestTTL (its code is about to be exchanged).
 func (s *Store) registerDCR(c clientRow, maxUnused int, minAge time.Duration) error {
 	uris, err := json.Marshal(c.RedirectURIs)
 	if err != nil {
@@ -75,8 +86,10 @@ func (s *Store) registerDCR(c clientRow, maxUnused int, minAge time.Duration) er
 		}
 		if n >= maxUnused {
 			var victim string
-			err := tx.QueryRow(`SELECT id FROM oauth_clients WHERE `+unused+` AND created <= ? ORDER BY created, id LIMIT 1`,
-				s.now().Add(-minAge).Unix()).Scan(&victim)
+			err := tx.QueryRow(`SELECT id FROM oauth_clients WHERE `+unused+` AND created <= ?
+				AND NOT EXISTS (SELECT 1 FROM auth_requests a WHERE a.client_id = oauth_clients.id AND a.done = 1 AND a.created > ?)
+				ORDER BY created, id LIMIT 1`,
+				s.now().Add(-minAge).Unix(), s.now().Add(-authRequestTTL).Unix()).Scan(&victim)
 			if errors.Is(err, sql.ErrNoRows) {
 				return errRegistryFull
 			}

@@ -79,13 +79,20 @@ A change that needs to bend one of these is a design change: stop and ask the ow
 ## Dependencies
 
 Direct dependencies are limited to: `github.com/modelcontextprotocol/go-sdk`, `go.yaml.in/yaml/v3`,
-`modernc.org/sqlite`, `golang.org/x/time`. Adding one needs the owner's approval and a line here with
-the reason. Prefer the standard library.
+`modernc.org/sqlite`, `golang.org/x/time`, `github.com/zitadel/oidc/v3` (the OAuth 2.1 protocol
+core, chosen by the owner on 2026-10-02 for being maintained and widely reviewed; spec 6.2), and
+`github.com/go-webauthn/webauthn` (passkeys). `github.com/go-jose/go-jose/v4` appears as direct only
+because `op.Storage` method signatures use its types; it is the version zitadel requires and adds no
+module. Adding one needs the owner's approval and a line here with the reason. Prefer the standard
+library.
 
 Bumping `github.com/modelcontextprotocol/go-sdk` (including Dependabot PRs) must re-run the
 session-cap tests in `internal/server` and re-check the two SDK behaviours the cap relies on: the
 last `getServer` call is the server a new session connects to, and the initialize response carries
 `Mcp-Session-Id` (see `internal/server/sessions.go`).
+
+Bumping `github.com/zitadel/oidc/v3` must re-run `go test -race ./internal/oauth ./internal/server`
+and re-check the library behaviours listed in `internal/oauth/AGENTS.md`.
 
 ## Workflow
 

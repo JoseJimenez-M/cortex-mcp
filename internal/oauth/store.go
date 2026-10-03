@@ -26,9 +26,8 @@ var (
 // Store is the OAuth state inside the auth database. It is safe for
 // concurrent use. now is injected so tests can expire things.
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
-	//lint:ignore U1000 -- used by the expiry sweep in a later task (authrequest.go)
+	db        *sql.DB
+	now       func() time.Time
 	lastSweep atomic.Int64 // Unix seconds of the last sweep
 }
 
