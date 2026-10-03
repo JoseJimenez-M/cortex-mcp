@@ -356,12 +356,14 @@ func TestDefaultScopeAndResponseMode(t *testing.T) {
 func TestIssOnLibraryErrorRedirects(t *testing.T) {
 	e := newTestEnv(t)
 	clientID := e.register(t, loopbackRedirect)
-	resp, err := e.browser.Get(e.authorizeURL(clientID, loopbackRedirect, newPKCE(), url.Values{"response_type": {"token"}}))
+	// prompt=none together with login is an error the library itself
+	// redirects (ValidateAuthReqPrompt).
+	resp, err := e.browser.Get(e.authorizeURL(clientID, loopbackRedirect, newPKCE(), url.Values{"prompt": {"none login"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	loc := locationOf(t, resp)
-	if loc.Query().Get("error") == "" || loc.Query().Get("iss") != e.url {
+	if loc.Query().Get("error") != "invalid_request" || loc.Query().Get("iss") != e.url || loc.Query().Get("state") != "st-1" {
 		t.Fatalf("error redirect %s", loc)
 	}
 }
@@ -600,5 +602,124 @@ func TestNoStoreOnRegisterAndToken(t *testing.T) {
 	}
 	if resp.Header.Get("Cache-Control") != "no-store" {
 		t.Errorf("token response headers = %v", resp.Header)
+	}
+}
+
+// refusedWithoutRedirect asserts a 400 with no Location header.
+func refusedWithoutRedirect(t *testing.T, name string, resp *http.Response) {
+	t.Helper()
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Location") != "" {
+		t.Errorf("%s: %d %q", name, resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+// The library's form decoder matches keys case-insensitively and walks
+// the form map in random order, so a case variant of a parameter could
+// override the value the pre-check looked at. Each case runs 50 times to
+// cover the map orders.
+func TestCaseVariantAndRepeatedParametersRefused(t *testing.T) {
+	e := newTestEnv(t)
+	clientID := e.register(t, loopbackRedirect)
+	other := e.register(t, "http://localhost/other")
+	evil := "http://evil.com@127.0.0.1/callback"
+	cases := map[string]func(url.Values){
+		"REDIRECT_URI added":    func(q url.Values) { q["REDIRECT_URI"] = []string{evil} },
+		"Redirect_Uri only":     func(q url.Values) { q["Redirect_Uri"] = q["redirect_uri"]; delete(q, "redirect_uri") },
+		"Client_Id added":       func(q url.Values) { q["Client_Id"] = []string{other} },
+		"Response_Mode added":   func(q url.Values) { q["Response_Mode"] = []string{"fragment"} },
+		"RESPONSE_TYPE added":   func(q url.Values) { q["RESPONSE_TYPE"] = []string{"token"} },
+		"Code_Challenge_Method": func(q url.Values) { q["Code_Challenge_Method"] = []string{"plain"} },
+		"Resource added":        func(q url.Values) { q["Resource"] = []string{"https://other.example/mcp"} },
+		"two redirect_uri":      func(q url.Values) { q["redirect_uri"] = []string{loopbackRedirect, evil} },
+		"two state":             func(q url.Values) { q["state"] = []string{"a", "b"} },
+	}
+	// U+017F (long s) folds to "s" under strings.EqualFold, as in the decoder.
+	cases["long s state"] = func(q url.Values) { q["\u017ftate"] = []string{"x"} }
+	for name, mutate := range cases {
+		for i := 0; i < 50; i++ {
+			q, _ := url.ParseQuery(strings.SplitN(e.authorizeURL(clientID, loopbackRedirect, newPKCE(), nil), "?", 2)[1])
+			mutate(q)
+			resp, err := e.browser.Get(e.url + "/authorize?" + q.Encode())
+			if err != nil {
+				t.Fatal(err)
+			}
+			refusedWithoutRedirect(t, name+" GET", resp)
+			resp, err = e.browser.PostForm(e.url+"/authorize", q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refusedWithoutRedirect(t, name+" POST", resp)
+		}
+	}
+	// A parameter split between the query and the body is a repeat too.
+	q, _ := url.ParseQuery(strings.SplitN(e.authorizeURL(clientID, loopbackRedirect, newPKCE(), nil), "?", 2)[1])
+	resp, err := e.browser.PostForm(e.url+"/authorize?redirect_uri="+url.QueryEscape(evil), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusedWithoutRedirect(t, "query and body", resp)
+	// Unrelated unknown parameters are dropped, not refused: a request
+	// object the library would otherwise act on is simply ignored.
+	e.startAuthorize(t, e.browser, e.authorizeURL(clientID, loopbackRedirect, newPKCE(), url.Values{"request": {"x"}, "foo": {"bar"}}))
+}
+
+func TestResponseTypeMustBeCode(t *testing.T) {
+	e := newTestEnv(t)
+	clientID := e.register(t, loopbackRedirect)
+	for _, rt := range []string{"token", "code id_token", "id_token", "", "CODE"} {
+		resp, err := e.browser.Get(e.authorizeURL(clientID, loopbackRedirect, newPKCE(), url.Values{"response_type": {rt}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		refusedWithoutRedirect(t, "response_type "+rt, resp)
+	}
+}
+
+func TestTokenAndRevokeCaseVariantsRefused(t *testing.T) {
+	e := newTestEnv(t)
+	clientID := e.register(t, loopbackRedirect)
+	for name, extra := range map[string]url.Values{
+		"Resource":      {"Resource": {"https://other.example/mcp"}},
+		"Code_Verifier": {"Code_Verifier": {newPKCE().verifier}},
+		"GRANT_TYPE":    {"GRANT_TYPE": {"client_credentials"}},
+		"two codes":     {"code": {"a", "b"}},
+	} {
+		p := newPKCE()
+		code := e.approvedCode(t, clientID, p)
+		status, out := e.exchange(t, clientID, code, loopbackRedirect, p.verifier, extra)
+		if status != http.StatusBadRequest || out["error"] != "invalid_request" {
+			t.Errorf("token %s: %d %v", name, status, out["error"])
+		}
+		// The refused request did not consume the code.
+		if status, out := e.exchange(t, clientID, code, loopbackRedirect, p.verifier, nil); status != http.StatusOK {
+			t.Errorf("token %s: the code no longer works: %d %v", name, status, out["error"])
+		}
+	}
+	for name, form := range map[string]url.Values{
+		"TOKEN":     {"TOKEN": {"x"}, "token": {"y"}, "client_id": {clientID}},
+		"Client_Id": {"token": {"x"}, "Client_Id": {clientID}},
+	} {
+		if status, out := e.postForm(t, "/revoke", form); status != http.StatusBadRequest || out["error"] != "invalid_request" {
+			t.Errorf("revoke %s: %d %v", name, status, out)
+		}
+	}
+}
+
+func TestIssAppendedWithoutReencoding(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://127.0.0.1/cb?b=2&a=1&code=X":        "http://127.0.0.1/cb?b=2&a=1&code=X&iss=https%3A%2F%2Fmcp.example",
+		"http://127.0.0.1/cb?z=a+b&iss=old&state=s": "http://127.0.0.1/cb?z=a+b&state=s&iss=https%3A%2F%2Fmcp.example",
+		"http://127.0.0.1/cb":                       "http://127.0.0.1/cb?iss=https%3A%2F%2Fmcp.example",
+		"https://mcp.example/login?id=1":            "https://mcp.example/login?id=1",
+		"/login?id=1":                               "/login?id=1",
+	} {
+		rec := httptest.NewRecorder()
+		w := &issWriter{ResponseWriter: rec, iss: "https://mcp.example"}
+		w.Header().Set("Location", in)
+		w.WriteHeader(http.StatusFound)
+		if got := rec.Header().Get("Location"); got != want {
+			t.Errorf("%s -> %s, want %s", in, got, want)
+		}
 	}
 }

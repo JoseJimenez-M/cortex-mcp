@@ -276,6 +276,16 @@ func checkPublicURL(raw string) string {
 	if u.Scheme != "https" && !(u.Scheme == "http" && IsLoopbackHost(u.Hostname())) {
 		return hint
 	}
+	// The issuer and the MCP resource URL are derived from this string and
+	// compared byte for byte, so it must already be in the form clients
+	// normalize URLs to: lowercase scheme and host, no trailing dot, no
+	// default port.
+	if !strings.HasPrefix(raw, u.Scheme+"://") || u.Host != strings.ToLower(u.Host) || strings.HasSuffix(u.Hostname(), ".") {
+		return "must be written in canonical form: lowercase scheme and host, no trailing dot"
+	}
+	if p := u.Port(); (u.Scheme == "https" && p == "443") || (u.Scheme == "http" && p == "80") {
+		return "must not name the default port of its scheme"
+	}
 	if strings.HasSuffix(u.Host, ":") {
 		return "has an empty port after the colon"
 	}

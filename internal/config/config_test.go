@@ -107,7 +107,7 @@ func TestValidateOK(t *testing.T) {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	for _, u := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://mcp.example.com/", "https://mcp.example.com:8443",
-		"http://LOCALHOST:8080", "http://localhost.:8080", "http://127.0.0.2:8080"} {
+		"http://127.0.0.2:8080", "http://localhost:443", "https://mcp.example.com:80"} {
 		c := valid()
 		c.PublicURL = u
 		if err := c.Validate(); err != nil {
@@ -175,6 +175,15 @@ func TestValidateErrors(t *testing.T) {
 		"url empty port":         {func(c *Config) { c.PublicURL = "https://mcp.example.com:" }, "public_url:"},
 		"url plus port":          {func(c *Config) { c.PublicURL = "https://mcp.example.com:+443" }, "public_url:"},
 		"url zero port":          {func(c *Config) { c.PublicURL = "https://mcp.example.com:0443" }, "public_url:"},
+		// The issuer and resource are compared exactly, so public_url must
+		// already be in the form a normalizing client would produce.
+		"url upper host":         {func(c *Config) { c.PublicURL = "https://MCP.example.com" }, "public_url:"},
+		"url upper localhost":    {func(c *Config) { c.PublicURL = "http://LOCALHOST:8080" }, "public_url:"},
+		"url upper scheme":       {func(c *Config) { c.PublicURL = "HTTPS://mcp.example.com" }, "public_url:"},
+		"url trailing dot":       {func(c *Config) { c.PublicURL = "https://mcp.example.com." }, "public_url:"},
+		"url localhost dot":      {func(c *Config) { c.PublicURL = "http://localhost.:8080" }, "public_url:"},
+		"url default https port": {func(c *Config) { c.PublicURL = "https://mcp.example.com:443" }, "public_url:"},
+		"url default http port":  {func(c *Config) { c.PublicURL = "http://localhost:80" }, "public_url:"},
 		"deny bad utf8":          {func(c *Config) { c.Deny = []string{"a\xffb"} }, "deny[0]"},
 		"deny format char":       {func(c *Config) { c.Deny = []string{"a\u202eb"} }, "deny[0]"},
 		"deny segment space":     {func(c *Config) { c.Deny = []string{"a /b"} }, "deny[0]"},

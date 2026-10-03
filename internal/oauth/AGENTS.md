@@ -69,8 +69,12 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
    The library validates prompt and response_type only after accepting a native client's loopback URI
    loosely (userinfo, any loopback IP, https), and redirects those errors; `Service.preCheck` therefore
    resolves the client and applies the allowlist before the library runs.
-2. The provider decodes `/authorize` parameters from `r.Form` after our wrapper parsed it (the default
-   scope relies on it).
+2. The provider decodes `/authorize`, `/oauth/token`, and `/revoke` parameters from `r.Form` after our
+   wrapper parsed it (the default scope relies on it), and its `ParseForm` is a no-op once `Form` and
+   `PostForm` are set. Its decoder (zitadel/schema) matches keys case-insensitively (`strings.EqualFold`)
+   and in map order, so a case variant could override a checked value: every OP endpoint that decodes goes
+   through `canonicalForm`, which keeps only exact known keys, refuses case variants and repeats, and
+   clears the raw query and body. `/authorize/callback` reads only `r.Form.Get("id")` (exact key, no decoder).
 3. `op.WithCORSOptions(nil)` disables CORS entirely.
 4. Refresh tokens are issued only when the stored scopes contain `offline_access` and the client lists
    the `refresh_token` grant.
