@@ -127,8 +127,8 @@ The design is in [`docs/specs/2026-10-01-cortex-mcp-design.md`](docs/specs/2026-
 ## Development
 
 Test-driven: write the failing test first, then the minimum code. Read `AGENTS.md` before changing
-anything; it lists the invariants and the package layout. Contributions need the agreement in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+anything; it lists the invariants and the package layout. Outside pull requests are not accepted
+until the contributor licence agreement in [CONTRIBUTING.md](CONTRIBUTING.md) is final.
 
 ```bash
 go test -race ./...
@@ -146,6 +146,6 @@ resale, including modified versions) requires a separate licence: contact jimene
 The full terms are in [`LICENSE`](LICENSE). This is not an OSI open source licence: personal,
 research, hobby, and noncommercial organizational use is permitted, commercial use is not. The Go
 standard library and modules built into the binary keep their own licences, reproduced in
-[`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES). Contributions
-are accepted under the contributor licence agreement in [`CONTRIBUTING.md`](CONTRIBUTING.md); security
-reports go to [`SECURITY.md`](SECURITY.md).
+[`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES). Outside contributions wait for the contributor
+licence agreement in [`CONTRIBUTING.md`](CONTRIBUTING.md); security reports go to
+[`SECURITY.md`](SECURITY.md).
