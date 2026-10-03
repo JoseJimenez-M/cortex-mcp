@@ -298,6 +298,10 @@ func TestCheckRedirectEntry(t *testing.T) {
 		"https://example.com/*/cb", "https://example.com/cb*", "https://*.example.com/cb",
 		"https://example.com/c b", "https://exämple.com/cb", "javascript:alert(1)//x",
 		"https://example.com/" + strings.Repeat("a", 600),
+		"https://:443/cb", "https://x:0/cb", "https://x:/cb", "https://x:65536/cb", "https://x:+80/cb",
+		"https://Example.com/cb", "https://example.com./cb", "https://example.com/%2e%2e/cb",
+		"https://example.com/a%2fb", "https://exa,mple.com/cb", "https://.example.com/cb",
+		"https://a..b/cb", "https://-a.com/cb", "https://[::1]/cb", "https://exa_mple.com/cb",
 	} {
 		if CheckRedirectEntry(bad) == "" {
 			t.Errorf("%q accepted", bad)

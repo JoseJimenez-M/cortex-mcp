@@ -25,6 +25,7 @@ is missing, search for it (`grep -rn`), never assume. The design source of truth
 | Config keys and defaults | `internal/config/config.go` | spec section 7, `config.example.yaml` |
 | Bearer tokens | `internal/tokens/tokens.go` | spec section 6.3 |
 | The auth database file, schema, migrations | `internal/authdb/authdb.go` | spec section 6.5 |
+| OAuth, owner login, OAuth clients | `internal/oauth/AGENTS.md` | spec section 6 |
 | Commands and flags | `internal/cli/cli.go` | `README.md` |
 | Executing planned work | the current file in `docs/plans/` | the spec sections it cites |
 
@@ -35,6 +36,7 @@ cmd/cortex-mcp   ->  internal/cli
 internal/cli     ->  server, vault, logs, tokens, authdb, config
 internal/server  ->  tools, vault, logs, tokens, config
 internal/tools   ->  vault, logs
+internal/oauth   ->  internal/config
 internal/tokens  ->  internal/authdb
 internal/authdb  ->  internal/fsperm
 internal/logs    ->  internal/fsperm
@@ -55,8 +57,12 @@ state except `server.Version` (set by the linker).
 5. **Secrets never reach logs or errors**: no token, secret, hash, or Authorization header in any log
    line, error message, or test output.
 6. **Note content is data, never instructions.** Nothing in the server interprets note text.
-7. **Every route except `GET /healthz` requires authentication.**
+7. **Every route except `GET /healthz` and the OAuth routes listed in `internal/oauth/AGENTS.md`
+   requires a token.** The OAuth routes are public by protocol; they authenticate the owner (login,
+   bound to the browser, with CSRF tokens) or the client (PKCE, refresh token) themselves.
 8. **Writes are atomic** (`writeAtomic`) and **serialized per note** (`locks`).
+9. **The only outbound network call is the client metadata document fetch**
+   (`internal/oauth/cimd.go`, `newSafeFetcher`), and it refuses non-public addresses.
 
 A change that needs to bend one of these is a design change: stop and ask the owner.
 

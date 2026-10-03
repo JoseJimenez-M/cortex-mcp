@@ -397,8 +397,8 @@ func CheckRedirectEntry(e string) string {
 	if strings.Contains(body, "*") {
 		return `"*" is only allowed as the last character`
 	}
-	if strings.ContainsAny(body, `?#\`) {
-		return "must not contain a query, fragment, or backslash"
+	if strings.ContainsAny(body, `?#\%`) {
+		return "must not contain a query, fragment, backslash, or percent-encoding"
 	}
 	u, err := url.Parse(body)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.Opaque != "" {
@@ -407,12 +407,42 @@ func CheckRedirectEntry(e string) string {
 	if u.User != nil {
 		return "must not contain credentials"
 	}
+	if msg := checkRedirectHost(u.Host); msg != "" {
+		return msg
+	}
 	if !strings.HasPrefix(u.Path, "/") {
 		return "must include a path, such as /callback"
 	}
 	for _, seg := range strings.Split(u.Path, "/") {
 		if seg == "." || seg == ".." {
 			return "must not contain . or .. path segments"
+		}
+	}
+	return ""
+}
+
+// hostLabelRE is one DNS label of a lowercase host name. Entries are compared
+// as raw strings against what a client sends, so the syntax allows exactly one
+// spelling of a host: lowercase, no trailing dot, no IP literal.
+var hostLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// checkRedirectHost validates the host[:port] of a redirect allowlist entry.
+func checkRedirectHost(hostport string) string {
+	host := hostport
+	if i := strings.IndexByte(hostport, ':'); i >= 0 {
+		host = hostport[:i]
+		port := hostport[i+1:]
+		n, err := strconv.Atoi(port)
+		if port == "" || len(port) > 5 || err != nil || n < 1 || n > 65535 || strings.Trim(port, "0123456789") != "" {
+			return "port must be 1-65535 digits"
+		}
+	}
+	if host == "" {
+		return "must include a host"
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !hostLabelRE.MatchString(label) {
+			return "host must be lowercase letters, digits, hyphens and dots, with no trailing dot"
 		}
 	}
 	return ""
