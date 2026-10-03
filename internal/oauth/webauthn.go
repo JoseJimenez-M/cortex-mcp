@@ -28,6 +28,17 @@ const (
 	// access logs and history; a custom header also makes any cross-origin
 	// attempt a CORS preflight, which this server never answers.
 	csrfHeader = "X-CSRF-Token"
+
+	// enrollSessionHeader carries the registration ceremony key from
+	// /enroll/begin to /enroll/finish, outside the URL for the same reason.
+	enrollSessionHeader = "X-Enroll-Session"
+)
+
+var (
+	// errCounterNotIncreased: the stored sign count is not below the new
+	// one, so another login recorded it first; treated as a clone signal.
+	errCounterNotIncreased = errors.New("passkey sign count did not increase")
+	errPasskeyExists       = errors.New("passkey already registered")
 )
 
 // ownerUser is the single owner as a WebAuthn user.
@@ -74,18 +85,55 @@ func (s *Store) addPasskey(c *webauthn.Credential) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`INSERT INTO passkeys(id, credential, created) VALUES(?, ?, ?)`, c.ID, raw, s.unix())
-	return err
+	res, err := s.db.Exec(`INSERT INTO passkeys(id, credential, created) VALUES(?, ?, ?) ON CONFLICT(id) DO NOTHING`, c.ID, raw, s.unix())
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return errPasskeyExists
+	}
+	return nil
 }
 
 // updatePasskey stores the new signature counter and flags after a login.
+// The UPDATE is conditional on the stored count being lower (or both being
+// zero, for authenticators that never count), so of two logins validated
+// against the same stored count only the first is recorded; the other gets
+// errCounterNotIncreased. signCount is omitted from the JSON when zero,
+// hence the COALESCE; CAST keeps SQLite from reading the BLOB as JSONB.
 func (s *Store) updatePasskey(c *webauthn.Credential) error {
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE passkeys SET credential = ?, last_used = ? WHERE id = ?`, raw, s.unix(), c.ID)
-	return err
+	n := int64(c.Authenticator.SignCount)
+	res, err := s.db.Exec(`UPDATE passkeys SET credential = ?, last_used = ? WHERE id = ? AND (
+		COALESCE(json_extract(CAST(credential AS TEXT), '$.authenticator.signCount'), 0) < ?
+		OR (? = 0 AND COALESCE(json_extract(CAST(credential AS TEXT), '$.authenticator.signCount'), 0) = 0))`,
+		raw, s.unix(), c.ID, n, n)
+	if err != nil {
+		return err
+	}
+	if rows, err := res.RowsAffected(); err != nil || rows != 1 {
+		return errCounterNotIncreased
+	}
+	return nil
+}
+
+// readBody reads at most limit bytes of r's body. On failure it answers
+// with fixed text: "too large" for an oversized body, a generic message
+// for anything else (the cause is never echoed).
+func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err == nil {
+		return body, true
+	}
+	if mbe := (*http.MaxBytesError)(nil); errors.As(err, &mbe) {
+		oauthError(w, http.StatusRequestEntityTooLarge, "invalid_request", "the request body is too large")
+	} else {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "the request body could not be read")
+	}
+	return nil, false
 }
 
 // ceremonies holds WebAuthn challenges between begin and finish, in memory:
@@ -223,9 +271,8 @@ func (p *passkeys) finishLogin(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "the passkey prompt expired; try again")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxCredentialBytes))
-	if err != nil {
-		oauthError(w, http.StatusBadRequest, "invalid_request", "the passkey response is too large")
+	body, ok := readBody(w, r, maxCredentialBytes)
+	if !ok {
 		return
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
@@ -259,7 +306,12 @@ func (p *passkeys) finishLogin(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusUnauthorized, "access_denied", "passkey not accepted")
 		return
 	}
-	if err := p.store.updatePasskey(cred); err != nil {
+	if err := p.store.updatePasskey(cred); errors.Is(err, errCounterNotIncreased) {
+		p.logger.Warn("passkey refused: another login already recorded this signature counter, the authenticator may be cloned",
+			"client_id", a.ClientID)
+		oauthError(w, http.StatusUnauthorized, "access_denied", "passkey not accepted")
+		return
+	} else if err != nil {
 		p.logger.Error("passkey update failed", "err", err)
 		oauthError(w, http.StatusInternalServerError, "server_error", "sign-in failed")
 		return
@@ -295,8 +347,11 @@ func (p *passkeys) beginEnroll(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 		Code  string `json:"code"`
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxEnrollBodyBytes))
-	if err != nil || json.Unmarshal(body, &in) != nil {
+	body, ok := readBody(w, r, maxEnrollBodyBytes)
+	if !ok {
+		return
+	}
+	if json.Unmarshal(body, &in) != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "the request is not valid JSON")
 		return
 	}
@@ -356,18 +411,18 @@ func (p *passkeys) startEnrollment(token string) (string, *protocol.CredentialCr
 	return key, creation, nil
 }
 
-// finishEnroll is POST /enroll/finish?session=... with the attestation.
+// finishEnroll is POST /enroll/finish with the ceremony key in the
+// enrollSessionHeader header and the attestation as the body.
 // The session key is a random value from startEnrollment, not a secret
 // that outlives the ceremony: it is single use and expires in ceremonyTTL.
 func (p *passkeys) finishEnroll(w http.ResponseWriter, r *http.Request) {
-	sess, ok := p.cer.take("enroll:" + r.URL.Query().Get("session"))
+	sess, ok := p.cer.take("enroll:" + r.Header.Get(enrollSessionHeader))
 	if !ok {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "the registration expired; run cortex-mcp setup -passkey for a new link")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxCredentialBytes))
-	if err != nil {
-		oauthError(w, http.StatusBadRequest, "invalid_request", "the passkey response is too large")
+	body, ok := readBody(w, r, maxCredentialBytes)
+	if !ok {
 		return
 	}
 	parsed, err := protocol.ParseCredentialCreationResponseBytes(body)
@@ -386,8 +441,13 @@ func (p *passkeys) finishEnroll(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "the passkey was not accepted")
 		return
 	}
-	if err := p.store.addPasskey(cred); err != nil {
-		oauthError(w, http.StatusBadRequest, "invalid_request", "this passkey is already registered")
+	switch err := p.store.addPasskey(cred); {
+	case errors.Is(err, errPasskeyExists):
+		oauthError(w, http.StatusConflict, "invalid_request", "this passkey is already registered")
+		return
+	case err != nil:
+		p.logger.Error("passkey could not be stored", "err", err)
+		oauthError(w, http.StatusInternalServerError, "server_error", "the passkey could not be saved")
 		return
 	}
 	p.logger.Info("passkey registered")

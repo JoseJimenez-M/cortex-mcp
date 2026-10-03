@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -181,7 +183,8 @@ func (e *testEnv) enrollFinish(t *testing.T, k *softKey, begun map[string]any) (
 	t.Helper()
 	pk := begun["options"].(map[string]any)["publicKey"].(map[string]any)
 	body := k.create(t, pk["challenge"].(string), pk["user"].(map[string]any)["id"].(string))
-	return postJSON(t, http.DefaultClient, e.url+"/enroll/finish?session="+url.QueryEscape(begun["session"].(string)), body)
+	status, out, _ := postJSONWith(t, http.DefaultClient, e.url+"/enroll/finish", body, map[string]string{enrollSessionHeader: begun["session"].(string)})
+	return status, out
 }
 
 // enroll registers k for the owner through the enrollment page's API.
@@ -293,8 +296,25 @@ func TestEnrollmentRefusals(t *testing.T) {
 	if status, _ := postJSON(t, http.DefaultClient, e.url+"/enroll/begin", b); status != http.StatusBadRequest {
 		t.Fatalf("reused token: %d", status)
 	}
-	if status, _ := postJSON(t, http.DefaultClient, e.url+"/enroll/finish?session=nope", []byte(`{}`)); status != http.StatusBadRequest {
+	if status, _, _ := postJSONWith(t, http.DefaultClient, e.url+"/enroll/finish", []byte(`{}`), map[string]string{enrollSessionHeader: "nope"}); status != http.StatusBadRequest {
 		t.Fatalf("finish without begin: %d", status)
+	}
+}
+
+// The registration ceremony key is read from the header only, never from
+// the URL.
+func TestEnrollSessionKeyIsNeverReadFromTheURL(t *testing.T) {
+	e := newTestEnv(t)
+	sec := e.setupOwner(t)
+	begun := e.enrollBegin(t, sec.EnrollToken)
+	k := newSoftKey(t, e.url)
+	pk := begun["options"].(map[string]any)["publicKey"].(map[string]any)
+	body := k.create(t, pk["challenge"].(string), pk["user"].(map[string]any)["id"].(string))
+	if status, _ := postJSON(t, http.DefaultClient, e.url+"/enroll/finish?session="+url.QueryEscape(begun["session"].(string)), body); status != http.StatusBadRequest {
+		t.Fatalf("finish with the session key in the query: %d", status)
+	}
+	if n, _ := e.svc.store.passkeyCount(); n != 0 {
+		t.Fatal("a passkey was stored from a query-string session key")
 	}
 }
 
@@ -314,6 +334,7 @@ func TestEnrollmentLinkIsSingleUseUnderRace(t *testing.T) {
 		wg   sync.WaitGroup
 		mu   sync.Mutex
 		wins []started
+		errs []error
 	)
 	gate := make(chan struct{})
 	for range n {
@@ -325,12 +346,17 @@ func TestEnrollmentLinkIsSingleUseUnderRace(t *testing.T) {
 				wins = append(wins, started{key, opts})
 				mu.Unlock()
 			} else if !errors.Is(err, ErrNotFound) {
-				t.Errorf("startEnrollment: %v", err)
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
 			}
 		})
 	}
 	close(gate)
 	wg.Wait()
+	if len(errs) != 0 {
+		t.Fatalf("startEnrollment: %v", errs)
+	}
 	if len(wins) != 1 {
 		t.Fatalf("%d ceremonies started from one enrollment link, want 1", len(wins))
 	}
@@ -339,10 +365,26 @@ func TestEnrollmentLinkIsSingleUseUnderRace(t *testing.T) {
 	raw, _ := json.Marshal(wins[0].options)
 	var opts map[string]any
 	_ = json.Unmarshal(raw, &opts)
-	begun := map[string]any{"session": wins[0].key, "options": opts}
+	pk := opts["publicKey"].(map[string]any)
+	var bodies [2][]byte
+	for i := range bodies {
+		bodies[i] = newSoftKey(t, e.url).create(t, pk["challenge"].(string), pk["user"].(map[string]any)["id"].(string))
+	}
 	var codes [2]int
 	for i := range codes {
-		wg.Go(func() { codes[i], _ = e.enrollFinish(t, newSoftKey(t, e.url), begun) })
+		wg.Go(func() {
+			req, err := http.NewRequest(http.MethodPost, e.url+"/enroll/finish", strings.NewReader(string(bodies[i])))
+			if err != nil {
+				return
+			}
+			req.Header.Set(enrollSessionHeader, wins[0].key)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return
+			}
+			_ = resp.Body.Close()
+			codes[i] = resp.StatusCode
+		})
 	}
 	wg.Wait()
 	if got, _ := e.svc.store.passkeyCount(); got != 1 || codes[0]+codes[1] != http.StatusOK+http.StatusBadRequest {
@@ -631,5 +673,127 @@ func TestCeremonies(t *testing.T) {
 	clk.Advance(ceremonyTTL + time.Second)
 	if !c.put("fresh", d) {
 		t.Fatal("expired ceremonies still count against the cap")
+	}
+}
+
+// An assertion answers the challenge of the auth request it was begun for:
+// posted to another pending request's finish it is refused and neither
+// request is approved.
+func TestPasskeyAssertionIsBoundToItsAuthRequest(t *testing.T) {
+	e := newTestEnv(t)
+	sec := e.setupOwner(t)
+	k := newSoftKey(t, e.url)
+	e.enroll(t, k, sec.EnrollToken)
+	clientID := e.register(t, loopbackRedirect)
+	idA, csrfA := e.pendingPasskeyLogin(t, clientID)
+	idB, csrfB := e.pendingPasskeyLogin(t, clientID)
+	_, outA, _ := e.passkeyBegin(t, idA, csrfA)
+	if status, out, _ := e.passkeyBegin(t, idB, csrfB); status != http.StatusOK {
+		t.Fatalf("begin B: %d %v", status, out)
+	}
+	assertionA := k.get(t, outA["publicKey"].(map[string]any)["challenge"].(string), nil)
+	if status, _ := e.passkeyFinish(t, idB, csrfB, assertionA); status != http.StatusUnauthorized {
+		t.Fatalf("A's assertion on B's finish: %d", status)
+	}
+	if status, _ := e.passkeyFinish(t, idB, csrfA, assertionA); status != http.StatusBadRequest {
+		t.Fatalf("A's assertion with A's CSRF on B's finish: %d", status)
+	}
+	for _, id := range []string{idA, idB} {
+		if a, err := e.svc.store.authRequest(id); err != nil || a.IsDone {
+			t.Fatalf("auth request %s after a cross-request assertion: %v %+v", id, err, a)
+		}
+	}
+}
+
+// The user handle in an assertion must be the owner's.
+func TestPasskeyForeignUserHandleIsRefused(t *testing.T) {
+	e := newTestEnv(t)
+	sec := e.setupOwner(t)
+	k := newSoftKey(t, e.url)
+	e.enroll(t, k, sec.EnrollToken)
+	k.user = randBytes(64)
+	id, csrf := e.pendingPasskeyLogin(t, e.register(t, loopbackRedirect))
+	if status, _ := e.passkeyLogin(t, k, id, csrf, nil); status != http.StatusUnauthorized {
+		t.Fatalf("foreign user handle: %d", status)
+	}
+}
+
+// The login limiter's budget over one ceremony lifetime stays below the
+// ceremony cap, so admitted begins alone can never fill the map.
+func TestCeremonyCapExceedsTheLoginBudget(t *testing.T) {
+	if budget := loginGlobalBurst + int(ceremonyTTL/loginGlobalEvery); budget >= maxCeremonies {
+		t.Fatalf("login budget per ceremonyTTL = %d, maxCeremonies = %d", budget, maxCeremonies)
+	}
+}
+
+// The stored sign count only moves forward (both zero is allowed), so two
+// logins racing on one counter value cannot both be recorded.
+func TestUpdatePasskeyOnlyMovesTheCounterForward(t *testing.T) {
+	s, _ := newTestStore(t)
+	c := &webauthn.Credential{ID: []byte{1}, Authenticator: webauthn.Authenticator{SignCount: 5}}
+	if err := s.addPasskey(c); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		count uint32
+		want  error
+	}{{6, nil}, {6, errCounterNotIncreased}, {4, errCounterNotIncreased}, {7, nil}} {
+		c.Authenticator.SignCount = step.count
+		if err := s.updatePasskey(c); !errors.Is(err, step.want) {
+			t.Fatalf("update to %d: %v, want %v", step.count, err, step.want)
+		}
+	}
+	z := &webauthn.Credential{ID: []byte{2}}
+	if err := s.addPasskey(z); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if err := s.updatePasskey(z); err != nil {
+			t.Fatalf("zero counter update %d: %v", i, err)
+		}
+	}
+}
+
+func TestFinishEnrollStorageErrors(t *testing.T) {
+	e := newTestEnv(t)
+	sec := e.setupOwner(t)
+	k := newSoftKey(t, e.url)
+	e.enroll(t, k, sec.EnrollToken)
+	// The same authenticator again: a conflict, not a server error.
+	token, err := e.svc.store.NewEnrollment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, out := e.enrollFinish(t, k, e.enrollBegin(t, token)); status != http.StatusConflict {
+		t.Fatalf("registering the same passkey twice: %d %v", status, out)
+	}
+	// Any other storage failure is a 500 with fixed text.
+	if _, err := e.svc.store.db.Exec(`CREATE TRIGGER fail_insert BEFORE INSERT ON passkeys BEGIN SELECT RAISE(ABORT, 'disk on fire'); END`); err != nil {
+		t.Fatal(err)
+	}
+	token, _ = e.svc.store.NewEnrollment()
+	status, out := e.enrollFinish(t, newSoftKey(t, e.url), e.enrollBegin(t, token))
+	if status != http.StatusInternalServerError || strings.Contains(fmt.Sprint(out), "fire") {
+		t.Fatalf("storage failure: %d %v", status, out)
+	}
+}
+
+func TestPasskeyMessages(t *testing.T) {
+	login, enroll := string(passkeyLoginJS), string(enrollJS)
+	if !strings.Contains(login, "429") || !strings.Contains(login, "Too many attempts. Wait a minute") {
+		t.Fatal("the login script does not explain a 429")
+	}
+	if strings.Contains(enroll, "e.message") || !strings.Contains(enroll, "429") {
+		t.Fatal("the enroll script may show a raw exception message or does not explain a 429")
+	}
+	// A body that fails to read for a reason other than size gets fixed text.
+	rec := httptest.NewRecorder()
+	if _, ok := readBody(rec, httptest.NewRequest(http.MethodPost, "/", iotest.ErrReader(errors.New("secret detail"))), 10); ok ||
+		!strings.Contains(rec.Body.String(), "could not be read") || strings.Contains(rec.Body.String(), "secret") {
+		t.Fatalf("read error answer: %v %s", ok, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	if _, ok := readBody(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", 11))), 10); ok || !strings.Contains(rec.Body.String(), "too large") {
+		t.Fatalf("oversized body answer: %s", rec.Body.String())
 	}
 }

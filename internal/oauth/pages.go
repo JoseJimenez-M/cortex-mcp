@@ -126,6 +126,7 @@ const passkeyLoginJS template.JS = `(function () {
     var h = {'X-CSRF-Token': btn.dataset.csrf};
     try {
       var r = await fetch('/login/passkey/begin?' + q, {method: 'POST', headers: h});
+      if (r.status === 429) { throw new Error('busy'); }
       if (!r.ok) { throw new Error('begin'); }
       var pk = (await r.json()).publicKey;
       pk.challenge = dec(pk.challenge);
@@ -140,7 +141,8 @@ const passkeyLoginJS template.JS = `(function () {
       if (!f.ok) { throw new Error('finish'); }
       location.assign((await f.json()).redirect);
     } catch (e) {
-      document.getElementById('pkerr').textContent = 'Passkey sign-in did not work. Try again or use a code.';
+      document.getElementById('pkerr').textContent = e.message === 'busy' ?
+        'Too many attempts. Wait a minute and try again.' : 'Passkey sign-in did not work. Try again or use a code.';
     }
   });
 })();`
@@ -173,7 +175,10 @@ var enrollTmpl = template.Must(template.New("enroll").Parse(`<!doctype html>
 
 // enrollJS takes the one-time token from the URL fragment and removes it
 // from the address bar at once, so it is not left in history or shared.
-// The token and the code travel in the JSON body.
+// The token and the code travel in the JSON body, the ceremony key in the
+// X-Enroll-Session header (enrollSessionHeader). Only messages the script
+// wrote itself are shown: a browser exception (a cancelled prompt, a body
+// that is not JSON) gets a fixed sentence.
 const enrollJS template.JS = `(function () {
   var token = location.hash.slice(1);
   history.replaceState(null, '', location.pathname);
@@ -189,14 +194,20 @@ const enrollJS template.JS = `(function () {
     for (var i = 0; i < a.length; i++) { b += String.fromCharCode(a[i]); }
     return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
+  function Shown(msg) { this.msg = msg; }
+  async function answer(r) {
+    if (r.status === 429) { throw new Shown('too many attempts, wait a minute and try again'); }
+    var out = await r.json().catch(function () { return {}; });
+    if (!r.ok) { throw new Shown(out.error_description || 'the server refused the request'); }
+    return out;
+  }
   if (!token) { status.textContent = 'This link has no enrollment token.' + retry; }
   document.getElementById('enroll').addEventListener('submit', async function (ev) {
     ev.preventDefault();
     try {
       var r = await fetch('/enroll/begin', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({token: token, code: document.getElementById('code').value})});
-      var out = await r.json();
-      if (!r.ok) { throw new Error(out.error_description || 'enrollment refused'); }
+      var out = await answer(r);
       var pk = out.options.publicKey;
       pk.challenge = dec(pk.challenge);
       pk.user.id = dec(pk.user.id);
@@ -206,12 +217,12 @@ const enrollJS template.JS = `(function () {
         clientDataJSON: enc(c.response.clientDataJSON),
         attestationObject: enc(c.response.attestationObject),
         transports: c.response.getTransports ? c.response.getTransports() : []}});
-      var f = await fetch('/enroll/finish?session=' + encodeURIComponent(out.session),
-        {method: 'POST', headers: {'Content-Type': 'application/json'}, body: body});
-      if (!f.ok) { throw new Error('the passkey was not accepted'); }
+      await answer(await fetch('/enroll/finish',
+        {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Enroll-Session': out.session}, body: body}));
       status.textContent = 'Passkey registered. You can close this page.';
     } catch (e) {
-      status.textContent = 'Registration failed: ' + e.message + '.' + retry;
+      var msg = e instanceof Shown ? e.msg : 'the passkey prompt was cancelled or the browser could not create a passkey';
+      status.textContent = 'Registration failed: ' + msg + '.' + retry;
     }
   });
 })();`
