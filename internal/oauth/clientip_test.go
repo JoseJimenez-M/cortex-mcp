@@ -71,18 +71,18 @@ func TestIPLimiterKeepsSourcesApart(t *testing.T) {
 	}
 }
 
-// IPv6 sources share a bucket per /64: one host usually holds the whole
-// /64, so per-address buckets would give it 2^64 of them.
-func TestIPLimiterGroupsIPv6By64(t *testing.T) {
+// IPv6 sources share a bucket per /48: a /48 is a routine allocation, so
+// per-/64 buckets would let one attacker act as 65536 sources.
+func TestIPLimiterGroupsIPv6By48(t *testing.T) {
 	l := newIPLimiter(time.Hour, 1, 16)
 	if _, ok := l.allow(netip.MustParseAddr("2001:db8:1:2::1")); !ok {
 		t.Fatal("first refused")
 	}
-	if _, ok := l.allow(netip.MustParseAddr("2001:db8:1:2:ffff::9")); ok {
-		t.Fatal("same /64 got a fresh bucket")
+	if _, ok := l.allow(netip.MustParseAddr("2001:db8:1:ffff::9")); ok {
+		t.Fatal("another /64 of the same /48 got a fresh bucket")
 	}
-	if _, ok := l.allow(netip.MustParseAddr("2001:db8:1:3::1")); !ok {
-		t.Fatal("another /64 refused")
+	if _, ok := l.allow(netip.MustParseAddr("2001:db8:2::1")); !ok {
+		t.Fatal("another /48 refused")
 	}
 }
 

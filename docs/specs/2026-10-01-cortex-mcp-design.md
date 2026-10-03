@@ -306,7 +306,8 @@ Recorded so they are not re-derived. Each has tests in `internal/oauth`, `intern
   global one (login: 5 then 2 a minute per source, 10 a minute globally; registration: 5 then 1 every 6
   minutes per source, 10 then 1 a minute globally; `/authorize`: 20 then 1 every 3 s per source, 600 then
   10 a second globally; CIMD: 3 then 2 a minute per source, 10 a minute globally, plus a separate 5 then
-  1 every 10 s for documents on the host of an allowlisted https redirect, such as claude.ai), so one
+  1 every 10 s for documents on the host of an allowlisted https redirect, such as claude.ai, which fall
+  back to the general budget when theirs is empty), so one
   source cannot spend the whole budget and lock the owner out. When the global bucket refuses, the
   source's token is given back. The global `/authorize` bucket is a CPU circuit breaker only: disk is
   bounded by the pending caps below. Passkey begin and finish charge only the per-source login bucket: a
@@ -315,11 +316,12 @@ Recorded so they are not re-derived. Each has tests in `internal/oauth`, `intern
   owner's. `/enroll/begin` checks the enrollment link before charging anything, so junk is free.
 - **What a distributed attacker can still do** (accepted, single-owner server). Sources each spending
   their own rate keep a global bucket empty: about 30 for `/authorize`, 5 for the code budget (TOTP
-  and recovery codes refused; passkeys still work), 6 for `/register`, 5 for CIMD first fetches and 3
-  for the app-host CIMD budget (with junk paths on that host); 200 sources holding
+  and recovery codes refused; passkeys still work), 6 for `/register`, 5 for CIMD first fetches, and 8
+  for both CIMD budgets together, which app-host documents need (with junk paths on that host); 200 sources holding
   one pending request each evict the owner's pending request (the owner starts again); 1024 passkey
   begins within the owner's ceremony evict it. None of these grants access; each delays a sign-in.
-  Buckets are LRU-bounded at 4096 sources and IPv6 is grouped per /64. The source is the TCP peer, or the
+  Buckets are LRU-bounded at 4096 sources and IPv6 is grouped per /48 (a /48 is a routine, cheap
+  allocation; per /64, one attacker would count as 65536 sources). The source is the TCP peer, or the
   right-most untrusted `X-Forwarded-For` entry when the peer is in config `trusted_proxies` (each entry at
   least /8 for IPv4 or /32 for IPv6); no other header is read. With Caddy in Docker this trusts every
   container on that network, which is accepted for containers the owner runs.

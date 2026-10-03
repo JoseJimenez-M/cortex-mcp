@@ -121,8 +121,10 @@ func remoteAddr(s string) netip.Addr {
 }
 
 // ipLimiter is a token bucket per source, bounded by an LRU. IPv4 sources
-// are keyed per address, IPv6 per /64 (a single host usually controls a
-// whole /64). An unparsable source shares one bucket (the zero prefix).
+// are keyed per address, IPv6 per /48: a /48 is a routine allocation (many
+// providers hand one to a single customer, and tunnel brokers give them away),
+// so keying per /64 would let one attacker look like 65536 sources. An
+// unparsable source shares one bucket (the zero prefix).
 type ipLimiter struct {
 	mu    sync.Mutex
 	every time.Duration
@@ -142,7 +144,7 @@ func newIPLimiter(every time.Duration, burst, size int) *ipLimiter {
 }
 
 func sourceKey(a netip.Addr) netip.Prefix {
-	bits := 64
+	bits := 48
 	if a.Is4() {
 		bits = 32
 	}
@@ -194,19 +196,33 @@ func (l *ipLimiter) len() int {
 // source's token is given back, so a source does not pay for a budget that
 // others spent.
 func admitSource(perIP *ipLimiter, global *rate.Limiter, a netip.Addr) (time.Duration, bool) {
+	return admitSourceAny(perIP, a, global)
+}
+
+// admitSourceAny is admitSource with fallbacks: after the source's bucket,
+// the first of globals with a token is charged. The source's token is given
+// back only when every one of them refuses.
+func admitSourceAny(perIP *ipLimiter, a netip.Addr, globals ...*rate.Limiter) (time.Duration, bool) {
 	now := time.Now()
 	res, d, ok := perIP.reserve(a, now)
 	if !ok {
 		return d, false
 	}
-	if _, d, ok := reserveAt(global, now); !ok {
-		// CancelAt with the reservation's own time: rate restores tokens only
-		// for a reservation that has not yet come due, and with a later time
-		// (Cancel uses time.Now) an immediate one never would.
-		res.CancelAt(now)
-		return d, false
+	wait := time.Duration(0)
+	for _, g := range globals {
+		_, d, ok := reserveAt(g, now)
+		if ok {
+			return 0, true
+		}
+		if wait == 0 || d < wait {
+			wait = d
+		}
 	}
-	return 0, true
+	// CancelAt with the reservation's own time: rate restores tokens only for
+	// a reservation that has not yet come due, and with a later time (Cancel
+	// uses time.Now) an immediate one never would.
+	res.CancelAt(now)
+	return wait, false
 }
 
 // reserveAt takes a token only if one is available at now, and returns

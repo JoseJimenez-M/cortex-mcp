@@ -19,7 +19,7 @@ const (
 
 	// Pending (not yet approved) authorization requests are capped, since
 	// /authorize is unauthenticated, and the caps are fair per source (the
-	// rate-limit key, an IPv4 address or IPv6 /64): a source keeps at most
+	// rate-limit key, an IPv4 address or IPv6 /48): a source keeps at most
 	// maxPendingPerSource, its oldest going first. Beyond
 	// maxPendingAuthRequests overall, the oldest pending row of the source
 	// holding the most is deleted, so a source with a single row (the owner

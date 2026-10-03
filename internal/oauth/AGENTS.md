@@ -62,7 +62,7 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
   the global bucket refuses). Code attempts on `/login` and the TOTP check of `/enroll/begin`
   (`loginPages.admit`, after the link is checked), `/register`, `/authorize`, and CIMD first fetches
   (the source reaches the resolver through the request context, `withSource`) charge a per-source
-  bucket (`ipLimiter`, LRU-bounded at `ipLimiterSize`, IPv6 per /64) before the global one. Passkey
+  bucket (`ipLimiter`, LRU-bounded at `ipLimiterSize`, IPv6 per /48) before the global one. Passkey
   begin and finish charge only the per-source login bucket (`admitPasskey`): passkeys cannot be
   guessed, and keeping them off the global bucket means TOTP guessing cannot block them; a full
   ceremony map evicts its oldest entry. Pending auth requests are capped per source

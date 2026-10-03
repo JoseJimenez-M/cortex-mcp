@@ -72,7 +72,8 @@ file but never change, move, or delete it.
   over https on port 443 only, never from private, loopback, or other non-public addresses, without
   following redirects, within 5 seconds and 64 KiB, at most 10 new fetches a minute (and 3, then 2 a
   minute, per source address; documents on the host of an allowlisted redirect, such as claude.ai, have
-  a separate budget of 5, then 1 every 10 seconds), and cached for 1 hour. Redirect URIs in a document that are not on the
+  a separate budget of 5, then 1 every 10 seconds, and fall back to the general one when it is empty),
+  and cached for 1 hour. Redirect URIs in a document that are not on the
   allowlist are dropped and the rest kept. If the document host is briefly unreachable, a client that
   already has a connection keeps working from the cache for up to 24 hours; a well-formed document
   that is refused (no allowed redirect URI left, a different client id, a confidential client) ends it
@@ -85,8 +86,9 @@ file but never change, move, or delete it.
   dropped).
 - These limits keep a single source, or a few, from locking you out. Many sources together still can
   delay a sign-in (never grant one): about 30 can keep `/authorize` refusing, 5 can keep the global
-  code budget empty (passkeys keep working), and 3 to 6 can keep the registration or metadata document
-  budgets empty.
+  code budget empty (passkeys keep working), 6 the registration budget, and 5 the metadata document
+  budget (8 for documents hosted by claude.ai, ChatGPT, or Meta, which have a budget of their own on
+  top). An IPv6 /48 counts as one address.
 - `/register` is rate limited per source address (5, then 1 every 6 minutes) and globally (10, then 1 a
   minute). At most 50 registered clients that never completed a login are kept; when full, the oldest
   one older than 10 minutes is evicted. Clients with a connection never count and are never evicted.

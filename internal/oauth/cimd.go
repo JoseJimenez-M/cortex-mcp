@@ -49,7 +49,8 @@ const (
 	// (claude.ai, chatgpt.com, agent.meta.ai by default) draw on a budget of
 	// their own, so junk ids that drain the general one cannot keep those
 	// apps from connecting: cimdAppBurst, then one every cimdAppEvery,
-	// behind the same per-source buckets.
+	// behind the same per-source buckets, falling back to the general
+	// budget when it is empty.
 	cimdAppBurst = 5
 	cimdAppEvery = 10 * time.Second
 )
@@ -492,7 +493,9 @@ func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error
 	case granted:
 		allowed = c.refetch.Allow()
 	case c.appHosts[cimdHost(id)]:
-		_, allowed = admitSource(c.perIP, c.appLimit, sourceFrom(ctx))
+		// The app budget first, then the general one: an attacker has to
+		// empty both to keep an allowlisted app from connecting.
+		_, allowed = admitSourceAny(c.perIP, sourceFrom(ctx), c.appLimit, c.limit)
 	default:
 		_, allowed = admitSource(c.perIP, c.limit, sourceFrom(ctx))
 	}

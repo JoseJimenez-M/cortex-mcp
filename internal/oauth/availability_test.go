@@ -133,7 +133,7 @@ func pendingCount(t *testing.T, s *Store) int {
 	return count(t, s, `SELECT COUNT(*) FROM auth_requests WHERE done = 0`)
 }
 
-// Pending requests are capped per source (the /32 or /64 clientIP keys
+// Pending requests are capped per source (the /32 or /48 clientIP keys
 // limits on), oldest first; an approved one is never evicted.
 func TestPendingAuthRequestsAreCappedPerSource(t *testing.T) {
 	o, s, clk := newTestOP(t)
@@ -150,12 +150,12 @@ func TestPendingAuthRequestsAreCappedPerSource(t *testing.T) {
 	if _, err := s.authRequest(first); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("the oldest pending request of the source survived: %v", err)
 	}
-	// IPv6 sources share a cap per /64.
+	// IPv6 sources share a cap per /48, across its /64s.
 	for i := 0; i < 2*maxPendingPerSource; i++ {
-		createFrom(t, o, "A", fmt.Sprintf("2001:db8:1:2::%x", i+1))
+		createFrom(t, o, "A", fmt.Sprintf("2001:db8:1:%x::1", i+1))
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM auth_requests WHERE done = 0 AND source = ?`, "2001:db8:1:2::/64"); n != maxPendingPerSource {
-		t.Fatalf("pending for one /64 = %d, want %d", n, maxPendingPerSource)
+	if n := count(t, s, `SELECT COUNT(*) FROM auth_requests WHERE done = 0 AND source = ?`, "2001:db8:1::/48"); n != maxPendingPerSource {
+		t.Fatalf("pending for one /48 = %d, want %d", n, maxPendingPerSource)
 	}
 	if a, err := s.authRequest(approved.ID); err != nil || !a.IsDone {
 		t.Fatalf("the approved request was evicted: %v", err)
@@ -250,6 +250,34 @@ func TestAllowlistedHostCIMDHasItsOwnBudget(t *testing.T) {
 	}
 	if _, err := r.resolve(context.Background(), "https://evil.example.com/c.json"); !errors.Is(err, errCIMD) || f.calls.Load() != 1 {
 		t.Fatalf("a junk id was fetched from the drained general budget: calls %d, %v", f.calls.Load(), err)
+	}
+}
+
+// When the app-host budget is empty, an app-host document still draws on
+// the general budget: an attacker has to empty both to keep the app out.
+func TestAppHostCIMDFallsBackToTheGeneralBudget(t *testing.T) {
+	f := &fakeFetch{}
+	r, _, _ := newTestResolver(t, f)
+	r.appLimit = rate.NewLimiter(0, 0) // the app-host budget, drained
+	id := "https://claude.ai/oauth/mcp-client.json"
+	f.body.Store(cimdBody(id, "Claude", "https://claude.ai/api/mcp/auth_callback"))
+	src := withSource(context.Background(), netip.MustParseAddr("198.51.100.1"))
+	if _, err := r.resolve(src, id); err != nil {
+		t.Fatalf("app-host document with its own budget drained: %v", err)
+	}
+	if got := r.limit.Tokens(); got > cimdGlobalBurst-0.5 {
+		t.Fatalf("the fallback did not draw on the general budget: %.1f tokens left", got)
+	}
+	// Both drained: refused, and the source's token is given back.
+	r.limit = rate.NewLimiter(0, 0)
+	other := "https://claude.ai/oauth/other.json"
+	if _, err := r.resolve(src, other); !errors.Is(err, errCIMD) || f.calls.Load() != 1 {
+		t.Fatalf("fetched with both budgets drained: calls %d, %v", f.calls.Load(), err)
+	}
+	for i := 0; i < cimdPerIPBurst-1; i++ {
+		if _, ok := r.perIP.allow(netip.MustParseAddr("198.51.100.1")); !ok {
+			t.Fatalf("source token %d was not given back after both budgets refused", i)
+		}
 	}
 }
 

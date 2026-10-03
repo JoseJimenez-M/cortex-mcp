@@ -146,7 +146,7 @@ var oauthSchema = []string{
 	// request is a JSON object with the validated authorize parameters;
 	// browser is the hash of the cookie that started the request; source is
 	// the rate-limit key of the address that sent it (an IPv4 /32 or IPv6
-	// /64 prefix, '' when unknown), which the pending caps count by. It is a
+	// /48 prefix, '' when unknown), which the pending caps count by. It is a
 	// column, not a field of request, because the caps group and order by it
 	// in SQL on every insert (the index below).
 	`CREATE TABLE auth_requests (
