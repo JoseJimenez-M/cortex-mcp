@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -188,7 +189,10 @@ func TestValidateErrors(t *testing.T) {
 		"deny leading space":     {func(c *Config) { c.Deny = []string{" a"} }, "deny[0]"},
 		"deny trailing space":    {func(c *Config) { c.Deny = []string{"a "} }, "deny[0]"},
 		"deny empty":             {func(c *Config) { c.Deny = []string{""} }, "deny[0]"},
-		"bearer false":           {func(c *Config) { c.BearerTokens = false }, "bearer_tokens:"},
+		"bearer false":           {func(c *Config) { c.BearerTokens = false; c.OAuth.Enabled = false }, "bearer_tokens:"},
+		"allowlist empty":        {func(c *Config) { c.OAuth.RedirectAllowlist = nil }, "oauth.redirect_allowlist:"},
+		"allowlist bad":          {func(c *Config) { c.OAuth.RedirectAllowlist = []string{"loopback", "http://x/cb"} }, "oauth.redirect_allowlist[1]"},
+		"allowlist too long":     {func(c *Config) { c.OAuth.RedirectAllowlist = slices.Repeat([]string{"loopback"}, 33) }, "oauth.redirect_allowlist:"},
 		"write zero":             {func(c *Config) { c.Limits.MaxWriteBytes = 0 }, "limits.max_write_bytes:"},
 		"write over 8MiB":        {func(c *Config) { c.Limits.MaxWriteBytes = 8<<20 + 1 }, "limits.max_write_bytes:"},
 		"rpm zero":               {func(c *Config) { c.Limits.RequestsPerMinute = 0 }, "limits.requests_per_minute:"},
@@ -241,5 +245,74 @@ func TestIsLoopbackHost(t *testing.T) {
 		if got := IsLoopbackHost(h); got != want {
 			t.Errorf("IsLoopbackHost(%q) = %v, want %v", h, got, want)
 		}
+	}
+}
+
+func TestOAuthDefaults(t *testing.T) {
+	c, err := Load(write(t, yamlFor(valid())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.OAuth.Enabled || !slices.Equal(c.OAuth.RedirectAllowlist, DefaultRedirectAllowlist()) {
+		t.Fatalf("oauth defaults = %+v", c.OAuth)
+	}
+	want := []string{
+		"https://claude.ai/api/mcp/auth_callback",
+		"https://chatgpt.com/connector_platform_oauth_redirect",
+		"https://chatgpt.com/connector/oauth/*",
+		"https://agent.meta.ai/api/hatch/oauth/callback",
+		"loopback",
+	}
+	if !slices.Equal(DefaultRedirectAllowlist(), want) {
+		t.Fatalf("DefaultRedirectAllowlist = %v", DefaultRedirectAllowlist())
+	}
+}
+
+// A list in the file replaces the defaults instead of appending to them.
+func TestOAuthAllowlistReplacesDefaults(t *testing.T) {
+	c, err := Load(write(t, yamlFor(valid())+"oauth:\n  redirect_allowlist:\n    - https://claude.ai/api/mcp/auth_callback\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(c.OAuth.RedirectAllowlist, []string{"https://claude.ai/api/mcp/auth_callback"}) || !c.OAuth.Enabled {
+		t.Fatalf("oauth = %+v", c.OAuth)
+	}
+}
+
+func TestCheckRedirectEntry(t *testing.T) {
+	for _, ok := range []string{
+		"loopback",
+		"https://claude.ai/api/mcp/auth_callback",
+		"https://chatgpt.com/connector/oauth/*",
+		"https://example.com/cb",
+		"https://example.com:8443/cb",
+	} {
+		if msg := CheckRedirectEntry(ok); msg != "" {
+			t.Errorf("%q rejected: %s", ok, msg)
+		}
+	}
+	for _, bad := range []string{
+		"", "Loopback", "http://example.com/cb", "https://example.com", "https:///cb",
+		"https://user@example.com/cb", "https://example.com/cb?x=1", "https://example.com/cb#f",
+		"https://example.com/a/../cb", "https://example.com/./cb", `https://example.com\cb`,
+		"https://example.com/*/cb", "https://example.com/cb*", "https://*.example.com/cb",
+		"https://example.com/c b", "https://exämple.com/cb", "javascript:alert(1)//x",
+		"https://example.com/" + strings.Repeat("a", 600),
+	} {
+		if CheckRedirectEntry(bad) == "" {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestBearerFalseNeedsOAuth(t *testing.T) {
+	c := valid()
+	c.BearerTokens = false
+	if err := c.Validate(); err != nil {
+		t.Fatalf("bearer_tokens false with OAuth enabled rejected: %v", err)
+	}
+	c.OAuth.Enabled = false
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "bearer_tokens: false requires oauth.enabled") {
+		t.Fatalf("err = %v", err)
 	}
 }

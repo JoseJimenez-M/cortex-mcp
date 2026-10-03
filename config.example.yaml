@@ -4,7 +4,8 @@
 # The Markdown folder to serve. Absolute path.
 vault: /data/vault
 
-# Where auth.db (hashed Bearer tokens) and writes.log live. Absolute path.
+# Where auth.db (owner credentials, OAuth state, hashed Bearer tokens) and
+# writes.log live. Absolute path.
 # Must NOT be the vault or inside it, so secrets never sync with the notes.
 # On Linux and macOS it must also not be a shared directory (sticky or
 # world-writable, like /tmp): use a dedicated one.
@@ -36,9 +37,27 @@ listen: "127.0.0.1:8080"
 # match: with deny entries, consider adding .trash to deny as well.
 deny: []
 
-# Must stay true until OAuth is implemented: false is refused at startup
-# because no client could authenticate.
+# Bearer tokens (cortex-mcp token create) for clients that cannot run a
+# browser login. false = OAuth only: refused unless oauth.enabled is true and
+# the owner has run cortex-mcp setup.
 bearer_tokens: true
+
+# The built-in OAuth 2.1 server that assistant apps (claude.ai, ChatGPT,
+# Meta Muse, Claude Code) use to connect. Nothing can log in until the owner
+# runs cortex-mcp setup on the host. false removes every OAuth endpoint.
+oauth:
+  enabled: true
+  # Redirect URIs a client may register (dynamic registration or a client
+  # metadata document). Entries: "loopback" (http://localhost, 127.0.0.1 or
+  # [::1], any port, for native clients), an exact https URL, or an https
+  # URL ending in "/*", which matches exactly one more path segment. A list
+  # here replaces these defaults; at most 32 entries.
+  redirect_allowlist:
+    - https://claude.ai/api/mcp/auth_callback
+    - https://chatgpt.com/connector_platform_oauth_redirect
+    - https://chatgpt.com/connector/oauth/*
+    - https://agent.meta.ai/api/hatch/oauth/callback
+    - loopback
 
 limits:
   max_write_bytes: 1048576    # per write, 1 to 8388608 (8 MiB, the largest note the vault reads)

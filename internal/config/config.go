@@ -32,6 +32,9 @@ const (
 	maxLogSizeMBCap  = 1024
 	maxLogKeepCap    = 100
 	maxConfigBytes   = 1 << 20
+
+	maxRedirectEntries    = 32
+	maxRedirectEntryBytes = 512
 )
 
 // Limits are the per-request and per-client ceilings.
@@ -46,6 +49,30 @@ type Logs struct {
 	Keep      int `yaml:"keep"`
 }
 
+// OAuth configures the built-in OAuth 2.1 authorization server (spec 6.2).
+// Enabled defaults to true: login refuses until the owner runs
+// "cortex-mcp setup", which is the only step that creates secrets, so an
+// unconfigured server exposes nothing usable. false removes every OAuth
+// route and the resource_metadata link.
+type OAuth struct {
+	Enabled           bool     `yaml:"enabled"`
+	RedirectAllowlist []string `yaml:"redirect_allowlist"`
+}
+
+// DefaultRedirectAllowlist is the redirect allowlist from spec 6.2: the
+// published callbacks of claude.ai, ChatGPT, and Meta Muse, plus loopback
+// for native clients such as Claude Code. A fresh slice each call, so no
+// caller can change the defaults for another.
+func DefaultRedirectAllowlist() []string {
+	return []string{
+		"https://claude.ai/api/mcp/auth_callback",
+		"https://chatgpt.com/connector_platform_oauth_redirect",
+		"https://chatgpt.com/connector/oauth/*",
+		"https://agent.meta.ai/api/hatch/oauth/callback",
+		"loopback",
+	}
+}
+
 // Config is the whole server configuration. No field is secret: secrets
 // live only in the auth state under StateDir.
 type Config struct {
@@ -56,6 +83,7 @@ type Config struct {
 	InstructionsFile string   `yaml:"instructions_file"`
 	Deny             []string `yaml:"deny"`
 	BearerTokens     bool     `yaml:"bearer_tokens"`
+	OAuth            OAuth    `yaml:"oauth"`
 	Limits           Limits   `yaml:"limits"`
 	Logs             Logs     `yaml:"logs"`
 }
@@ -69,6 +97,7 @@ func Default() Config {
 		// port is reachable from outside the container's network namespace.
 		Listen:       "127.0.0.1:8080",
 		BearerTokens: true,
+		OAuth:        OAuth{Enabled: true, RedirectAllowlist: DefaultRedirectAllowlist()},
 		Limits:       Limits{MaxWriteBytes: 1 << 20, RequestsPerMinute: 60},
 		Logs:         Logs{MaxSizeMB: 5, Keep: 3},
 	}
@@ -199,8 +228,19 @@ func (c Config) Validate() error {
 			add("deny[%d] (%q): %s", i, d, msg)
 		}
 	}
-	if !c.BearerTokens {
-		add("bearer_tokens: cannot be false until OAuth is implemented, or no client could authenticate")
+	if !c.BearerTokens && !c.OAuth.Enabled {
+		add("bearer_tokens: false requires oauth.enabled: true, or no client could authenticate")
+	}
+	if c.OAuth.Enabled && len(c.OAuth.RedirectAllowlist) == 0 {
+		add("oauth.redirect_allowlist: must not be empty while oauth.enabled is true")
+	}
+	if len(c.OAuth.RedirectAllowlist) > maxRedirectEntries {
+		add("oauth.redirect_allowlist: at most %d entries", maxRedirectEntries)
+	}
+	for i, e := range c.OAuth.RedirectAllowlist {
+		if msg := CheckRedirectEntry(e); msg != "" {
+			add("oauth.redirect_allowlist[%d] (%q): %s", i, e, msg)
+		}
 	}
 	if c.Limits.MaxWriteBytes <= 0 || c.Limits.MaxWriteBytes > maxWriteBytesCap {
 		add("limits.max_write_bytes: must be between 1 and %d (the vault cannot read back a larger note)", maxWriteBytesCap)
@@ -325,6 +365,55 @@ func checkDeny(d string) string {
 	}
 	if path.Clean(d) == "." {
 		return "refers to the vault root and would match nothing"
+	}
+	return ""
+}
+
+// CheckRedirectEntry validates one redirect allowlist entry and returns ""
+// when it is valid. It is the single definition of the syntax: the OAuth
+// package calls it when it builds its matcher, so the two cannot disagree.
+// Entries are "loopback" or an https URL with a host and a path; a final "*"
+// right after a "/" makes the entry a prefix for exactly one more path
+// segment (see internal/oauth/redirect.go).
+func CheckRedirectEntry(e string) string {
+	if e == "loopback" {
+		return ""
+	}
+	if len(e) > maxRedirectEntryBytes {
+		return fmt.Sprintf("longer than %d bytes", maxRedirectEntryBytes)
+	}
+	for _, r := range e {
+		if r <= ' ' || r >= 0x7f {
+			return "must be printable ASCII without spaces"
+		}
+	}
+	body := e
+	if strings.HasSuffix(e, "*") {
+		body = strings.TrimSuffix(e, "*")
+		if !strings.HasSuffix(body, "/") {
+			return `a final "*" must follow a "/"`
+		}
+	}
+	if strings.Contains(body, "*") {
+		return `"*" is only allowed as the last character`
+	}
+	if strings.ContainsAny(body, `?#\`) {
+		return "must not contain a query, fragment, or backslash"
+	}
+	u, err := url.Parse(body)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.Opaque != "" {
+		return `must be "loopback" or an https URL`
+	}
+	if u.User != nil {
+		return "must not contain credentials"
+	}
+	if !strings.HasPrefix(u.Path, "/") {
+		return "must include a path, such as /callback"
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == "." || seg == ".." {
+			return "must not contain . or .. path segments"
+		}
 	}
 	return ""
 }
