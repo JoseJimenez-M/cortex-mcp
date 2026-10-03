@@ -34,10 +34,12 @@ var errBadLoginRequest = errors.New("sign-in request not valid")
 type loginPages struct {
 	store   *Store
 	base    string
-	limit   *rate.Limiter // global, every login attempt, any factor (passkeys too, Task 11)
+	limit   *rate.Limiter // global, every login attempt, any factor
 	perIP   *ipLimiter    // per source, in front of limit (admit)
 	proxies trustedProxies
 	logger  *slog.Logger
+
+	passkeysEnabled bool // set by New when WebAuthn is available
 }
 
 func newLoginPages(store *Store, base string, logger *slog.Logger) *loginPages {
@@ -141,7 +143,7 @@ func (l *loginPages) render(w http.ResponseWriter, a *authRequest, status int, m
 	if u != nil {
 		host = u.Host
 	}
-	renderLogin(w, status, loginData{ClientName: name, RedirectHost: host, ClientHost: clientHost, ID: a.ID, CSRF: a.CSRF, Passkey: n > 0, Error: msg}, originOf(u))
+	renderLogin(w, status, loginData{ClientName: name, RedirectHost: host, ClientHost: clientHost, ID: a.ID, CSRF: a.CSRF, Passkey: l.passkeysEnabled && n > 0, Error: msg}, originOf(u))
 }
 
 // submit is POST /login with a TOTP or recovery code.

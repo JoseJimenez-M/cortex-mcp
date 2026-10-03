@@ -65,6 +65,7 @@ type Service struct {
 	crypto   op.Crypto
 	reg      *registrar
 	login    *loginPages
+	passkeys *passkeys // nil when public_url's host cannot be a relying party id
 	op       *opStorage
 	allow    allowlist
 	logger   *slog.Logger
@@ -111,6 +112,12 @@ func New(o Options) (*Service, error) {
 	s.reg.proxies = proxies
 	s.login = newLoginPages(store, base, o.Logger)
 	s.login.proxies = proxies
+	if pk, err := newPasskeys(store, base, s.login, o.Logger); err != nil {
+		o.Logger.Warn("passkeys are disabled: the public_url host cannot be a WebAuthn relying party id (use a DNS name such as localhost); TOTP and recovery codes still work", "err", err)
+	} else {
+		s.passkeys = pk
+		s.login.passkeysEnabled = true
+	}
 	s.op = &opStorage{
 		s: store, base: base, mcpURL: s.mcpURL, allow: allow,
 		resolver: newCIMDResolver(store, allow, fetch, o.Logger), signing: signing, logger: o.Logger,
@@ -168,6 +175,13 @@ func (s *Service) Register(mux *http.ServeMux) {
 	handle("GET /login", http.HandlerFunc(s.login.show))
 	handle("POST /login", http.HandlerFunc(s.login.submit))
 	handle("POST /login/deny", http.HandlerFunc(s.login.deny))
+	if s.passkeys != nil {
+		handle("POST /login/passkey/begin", http.HandlerFunc(s.passkeys.beginLogin))
+		handle("POST /login/passkey/finish", http.HandlerFunc(s.passkeys.finishLogin))
+		handle("GET /enroll", http.HandlerFunc(s.passkeys.enrollPage))
+		handle("POST /enroll/begin", http.HandlerFunc(s.passkeys.beginEnroll))
+		handle("POST /enroll/finish", http.HandlerFunc(s.passkeys.finishEnroll))
+	}
 }
 
 // protectedResourceMetadata is RFC 9728. offline_access is deliberately

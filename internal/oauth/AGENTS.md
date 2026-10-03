@@ -57,7 +57,9 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
   network call.
 - **Pages** set a nonce-based CSP with `frame-ancestors 'none'`, use `html/template`, and have no
   inline event handlers.
-- **Rate limits are per source, then global.** `/login` (every factor, through `loginPages.admit`) and
+  Page scripts send the CSRF token in the `X-CSRF-Token` header (`csrfHeader`), never in a URL.
+- **Rate limits are per source, then global.** `/login` (every factor, through `loginPages.admit`;
+  passkeys charge it at `/login/passkey/begin` and `/enroll/begin`) and
   `/register` charge a per-source bucket (`ipLimiter`, LRU-bounded at `ipLimiterSize`, IPv6 per /64)
   before the global one. The source is `trustedProxies.clientIP`: X-Forwarded-For is read only when the
   TCP peer is in config `trusted_proxies`, right-most untrusted entry first. Never key a limit on a

@@ -104,7 +104,8 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
 
 // passkeyLoginJS runs a discoverable WebAuthn login: get options from
 // /login/passkey/begin, call the authenticator, post the assertion to
-// /login/passkey/finish, follow the returned redirect. It encodes binary
+// /login/passkey/finish, follow the returned redirect. The CSRF token goes
+// in the X-CSRF-Token header (csrfHeader), never in the URL. It encodes binary
 // fields by hand (base64url) instead of relying on
 // PublicKeyCredential.parseRequestOptionsFromJSON, which older browsers lack.
 // #nosec G101 -- browser script that names navigator.credentials; it holds no secret
@@ -121,9 +122,10 @@ const passkeyLoginJS template.JS = `(function () {
     return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
   btn.addEventListener('click', async function () {
-    var q = new URLSearchParams({id: btn.dataset.id, csrf: btn.dataset.csrf}).toString();
+    var q = 'id=' + encodeURIComponent(btn.dataset.id);
+    var h = {'X-CSRF-Token': btn.dataset.csrf};
     try {
-      var r = await fetch('/login/passkey/begin?' + q, {method: 'POST'});
+      var r = await fetch('/login/passkey/begin?' + q, {method: 'POST', headers: h});
       if (!r.ok) { throw new Error('begin'); }
       var pk = (await r.json()).publicKey;
       pk.challenge = dec(pk.challenge);
@@ -134,11 +136,82 @@ const passkeyLoginJS template.JS = `(function () {
         authenticatorData: enc(c.response.authenticatorData),
         signature: enc(c.response.signature),
         userHandle: c.response.userHandle ? enc(c.response.userHandle) : undefined}});
-      var f = await fetch('/login/passkey/finish?' + q, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: body});
+      var f = await fetch('/login/passkey/finish?' + q, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': btn.dataset.csrf}, body: body});
       if (!f.ok) { throw new Error('finish'); }
       location.assign((await f.json()).redirect);
     } catch (e) {
       document.getElementById('pkerr').textContent = 'Passkey sign-in did not work. Try again or use a code.';
+    }
+  });
+})();`
+
+type enrollData struct {
+	Nonce  string
+	Script template.JS
+}
+
+func renderEnroll(w http.ResponseWriter) {
+	d := enrollData{Nonce: newNonce(), Script: enrollJS}
+	pageHeaders(w, d.Nonce, "")
+	w.WriteHeader(http.StatusOK)
+	_ = enrollTmpl.Execute(w, d)
+}
+
+var enrollTmpl = template.Must(template.New("enroll").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Register a passkey</title><style nonce="{{.Nonce}}">` + pageStyle + `</style></head>
+<body>
+<h1>Register a passkey</h1>
+<p>Enter a current code from the authenticator app you set up with <code>cortex-mcp setup</code>, then follow your browser's passkey prompt.</p>
+<form id="enroll">
+<p><label>Authenticator code<br><input id="code" autocomplete="one-time-code" inputmode="numeric" maxlength="6" required autofocus></label></p>
+<button type="submit">Register passkey</button>
+</form>
+<p id="status" role="status"></p>
+<script nonce="{{.Nonce}}">{{.Script}}</script>
+</body></html>`))
+
+// enrollJS takes the one-time token from the URL fragment and removes it
+// from the address bar at once, so it is not left in history or shared.
+// The token and the code travel in the JSON body.
+const enrollJS template.JS = `(function () {
+  var token = location.hash.slice(1);
+  history.replaceState(null, '', location.pathname);
+  var status = document.getElementById('status');
+  var retry = ' Run cortex-mcp setup -passkey on the host for a new link if this one no longer works.';
+  function dec(s) {
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) { s += '='; }
+    return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); });
+  }
+  function enc(buf) {
+    var b = '', a = new Uint8Array(buf);
+    for (var i = 0; i < a.length; i++) { b += String.fromCharCode(a[i]); }
+    return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  if (!token) { status.textContent = 'This link has no enrollment token.' + retry; }
+  document.getElementById('enroll').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    try {
+      var r = await fetch('/enroll/begin', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: token, code: document.getElementById('code').value})});
+      var out = await r.json();
+      if (!r.ok) { throw new Error(out.error_description || 'enrollment refused'); }
+      var pk = out.options.publicKey;
+      pk.challenge = dec(pk.challenge);
+      pk.user.id = dec(pk.user.id);
+      (pk.excludeCredentials || []).forEach(function (c) { c.id = dec(c.id); });
+      var c = await navigator.credentials.create({publicKey: pk});
+      var body = JSON.stringify({id: c.id, rawId: enc(c.rawId), type: c.type, response: {
+        clientDataJSON: enc(c.response.clientDataJSON),
+        attestationObject: enc(c.response.attestationObject),
+        transports: c.response.getTransports ? c.response.getTransports() : []}});
+      var f = await fetch('/enroll/finish?session=' + encodeURIComponent(out.session),
+        {method: 'POST', headers: {'Content-Type': 'application/json'}, body: body});
+      if (!f.ok) { throw new Error('the passkey was not accepted'); }
+      status.textContent = 'Passkey registered. You can close this page.';
+    } catch (e) {
+      status.textContent = 'Registration failed: ' + e.message + '.' + retry;
     }
   });
 })();`
