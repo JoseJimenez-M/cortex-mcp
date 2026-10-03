@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -471,5 +472,50 @@ func TestStaleServeLogIsAggregated(t *testing.T) {
 	}
 	if n := strings.Count(buf.String(), "served stale"); n != 1 {
 		t.Fatalf("%d stale log lines: %s", n, buf.String())
+	}
+}
+
+// TestCIMDClientEndToEnd authorizes a client known only by its metadata
+// document URL: the document is served over real HTTPS by a local server
+// (httptest's client routes example.com to it and trusts its certificate),
+// fetched by the production fetcher minus the address guard
+// (TestSafeFetcherRefusesLoopback covers the guard), then the owner logs in
+// with TOTP, the code is exchanged, the token verified and refreshed.
+func TestCIMDClientEndToEnd(t *testing.T) {
+	var hits atomic.Int32
+	doc := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path != "/oauth/client.json" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(cimdBody(testCIMD, "Doc App", loopbackRedirect))
+	}))
+	defer doc.Close()
+	e := newTestEnvWith(t, func(o *Options) { o.fetch = newFetcher(doc.Client().Transport, 5*time.Second).fetch })
+	e.setupOwner(t)
+
+	p := newPKCE()
+	code := e.loginWithTOTP(t, e.browser, testCIMD, p)
+	status, tok := e.exchange(t, testCIMD, code, loopbackRedirect, p.verifier, nil)
+	if status != http.StatusOK {
+		t.Fatalf("token: %d %v", status, tok)
+	}
+	id, err := e.svc.Verify(context.Background(), tok["access_token"].(string))
+	if err != nil || id.ClientID != testCIMD || id.ClientName != "Doc App" || !strings.HasPrefix(id.UserID, "oauth:") {
+		t.Fatalf("identity %+v, %v", id, err)
+	}
+	status, next := e.postForm(t, "/oauth/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok["refresh_token"].(string)},
+		"client_id": {testCIMD}, "resource": {e.url + "/mcp"}})
+	if status != http.StatusOK {
+		t.Fatalf("refresh: %d %v", status, next)
+	}
+	if after, err := e.svc.Verify(context.Background(), next["access_token"].(string)); err != nil || after.UserID != id.UserID {
+		t.Fatalf("refreshed identity %+v, %v", after, err)
+	}
+	// The document is cached for cimdTTL: one fetch served the whole flow.
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("%d document fetches, want 1", n)
 	}
 }

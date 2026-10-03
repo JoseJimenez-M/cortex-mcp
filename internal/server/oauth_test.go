@@ -20,7 +20,9 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,14 +43,49 @@ type oauthEnv struct {
 	tokens   *tokens.Store
 	bearer   string // a Bearer token named "cli"
 	stateDir string
-	totp     []byte // the owner's TOTP secret
+	totp     []byte   // the owner's TOTP secret
+	recovery []string // the owner's recovery codes
 	clock    *clock
+	seen     *secretSet // when set, the helpers record every secret they handle
+}
+
+// secretSet collects the secrets a flow handled, so a test can check that
+// none of them reached a log. The helpers may run on SDK goroutines.
+type secretSet struct {
+	mu sync.Mutex
+	v  []string
+}
+
+func (s *secretSet) add(v ...string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, x := range v {
+		if x != "" {
+			s.v = append(s.v, x)
+		}
+	}
+}
+
+func (s *secretSet) list() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.v)
 }
 
 // setupOAuth serves the whole server with OAuth enabled and the owner set
 // up. The clock starts at the real time: the OAuth library and the SDK
 // compare token expiry with time.Now.
 func setupOAuth(t *testing.T, mutate func(*config.Config)) oauthEnv {
+	t.Helper()
+	return setupOAuthLogging(t, mutate, io.Discard)
+}
+
+// setupOAuthLogging is setupOAuth with the server's and the OAuth service's
+// operator logs written, at debug level, to out.
+func setupOAuthLogging(t *testing.T, mutate func(*config.Config), out io.Writer) oauthEnv {
 	t.Helper()
 	vaultDir, stateDir := t.TempDir(), t.TempDir()
 	var h http.Handler
@@ -78,7 +115,7 @@ func setupOAuth(t *testing.T, mutate func(*config.Config)) oauthEnv {
 	}
 	clk := &clock{}
 	clk.ns.Store(time.Now().UnixNano())
-	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	quiet := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	svc, err := oauth.New(oauth.Options{DB: db, PublicURL: cfg.PublicURL, RedirectAllowlist: cfg.OAuth.RedirectAllowlist, Logger: quiet, Now: clk.Now})
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +136,7 @@ func setupOAuth(t *testing.T, mutate func(*config.Config)) oauthEnv {
 		_ = db.Close()
 		_ = v.Close()
 	})
-	return oauthEnv{url: cfg.PublicURL, svc: svc, db: db, tokens: store, bearer: secret, stateDir: stateDir, totp: totp, clock: clk}
+	return oauthEnv{url: cfg.PublicURL, svc: svc, db: db, tokens: store, bearer: secret, stateDir: stateDir, totp: totp, recovery: sec.RecoveryCodes, clock: clk}
 }
 
 // totpCode is RFC 6238 (HMAC-SHA1, 30 s, 6 digits), written out here so
@@ -126,6 +163,15 @@ var csrfField = regexp.MustCompile(`name="csrf" value="([^"]+)"`)
 // redirect to the client. It returns errors instead of failing the test
 // because the SDK may call it from a goroutine other than the test's.
 func (e oauthEnv) browserAuthorize(authURL string) (url.Values, error) {
+	return e.browserAuthorizeWith(authURL, func() string {
+		e.clock.Advance(30 * time.Second) // a fresh TOTP step for every login
+		return totpCode(e.totp, e.clock.Now())
+	})
+}
+
+// browserAuthorizeWith is browserAuthorize with the login factor (a TOTP
+// code or a recovery code) supplied by factor.
+func (e oauthEnv) browserAuthorizeWith(authURL string, factor func() string) (url.Values, error) {
 	jar, _ := cookiejar.New(nil)
 	c := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	next := func(resp *http.Response, err error, want int) (*url.URL, string, error) {
@@ -154,8 +200,9 @@ func (e oauthEnv) browserAuthorize(authURL string) (url.Values, error) {
 	if m == nil {
 		return nil, errors.New("login page has no CSRF field")
 	}
-	e.clock.Advance(30 * time.Second) // a fresh TOTP step for every login
-	resp, err = c.PostForm(e.url+"/login", url.Values{"id": {login.Query().Get("id")}, "csrf": {m[1]}, "code": {totpCode(e.totp, e.clock.Now())}})
+	code := factor()
+	e.seen.add(code)
+	resp, err = c.PostForm(e.url+"/login", url.Values{"id": {login.Query().Get("id")}, "csrf": {m[1]}, "code": {code}})
 	cb, _, err := next(resp, err, http.StatusSeeOther)
 	if err != nil {
 		return nil, fmt.Errorf("login: %w", err)
@@ -165,6 +212,12 @@ func (e oauthEnv) browserAuthorize(authURL string) (url.Values, error) {
 	if err != nil {
 		return nil, fmt.Errorf("callback: %w", err)
 	}
+	if u, err := url.Parse(e.url); err == nil {
+		for _, ck := range jar.Cookies(u) {
+			e.seen.add(ck.Value)
+		}
+	}
+	e.seen.add(final.Query().Get("code"))
 	return final.Query(), nil
 }
 
@@ -198,6 +251,7 @@ func (e oauthEnv) tokenRequest(t *testing.T, form url.Values) (int, map[string]a
 func (e oauthEnv) grant(t *testing.T, clientID string) (string, string) {
 	t.Helper()
 	verifier := rand.Text() + rand.Text()
+	e.seen.add(verifier)
 	q := url.Values{"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {e2eRedirect}, "state": {"s"},
 		"scope": {"vault"}, "code_challenge": {s256(verifier)}, "code_challenge_method": {"S256"}, "resource": {e.url + "/mcp"}}
 	res, err := e.browserAuthorize(e.url + "/authorize?" + q.Encode())
@@ -212,12 +266,19 @@ func (e oauthEnv) grant(t *testing.T, clientID string) (string, string) {
 	if status != http.StatusOK {
 		t.Fatalf("token: %d %v", status, tok)
 	}
+	e.seen.add(tok["access_token"].(string), tok["refresh_token"].(string))
 	return tok["access_token"].(string), tok["refresh_token"].(string)
 }
 
 func (e oauthEnv) refresh(t *testing.T, clientID, refresh string) (int, map[string]any) {
 	t.Helper()
-	return e.tokenRequest(t, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID}, "resource": {e.url + "/mcp"}})
+	status, out := e.tokenRequest(t, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID}, "resource": {e.url + "/mcp"}})
+	for _, k := range []string{"access_token", "refresh_token"} {
+		if v, ok := out[k].(string); ok {
+			e.seen.add(v)
+		}
+	}
+	return status, out
 }
 
 func challengeOf(t *testing.T, base, auth string) (int, string) {
