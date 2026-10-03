@@ -435,9 +435,11 @@ longer lists debian12 as updated); the release job runs only while the repositor
 tags on `main`, with `contents`, `packages`, and `id-token` write and nothing else, after the tests pass
 in a separate job with read-only `contents`; every action is pinned by commit SHA and the base image by
 digest (Dependabot bumps both); GoReleaser and syft are pinned by version, BuildKit and the SBOM scanner
-by version and digest; no QEMU (the image build runs no commands), no windows/arm64 binary, no separate
-provenance attestation; `latest` moves only for non-prerelease tags. Making the repository public and
-pushing the first tag are owner decisions, never automated.
+by version and digest; no QEMU (the image build runs no commands), no windows/arm64 binary; the
+provenance attestation buildx attaches by default when it pushes (SLSA provenance in its minimal mode,
+in the image index next to the SBOM) is kept, and no other provenance is generated; `latest` moves only
+for non-prerelease tags. Making the repository public and pushing the first tag are owner decisions,
+never automated.
 
 **Docs (English), shipped with the code and in every release archive:** `README.md` (what, status,
 security in brief, install pointers, commands, licence), `docs/install.md` (requirements, binary or

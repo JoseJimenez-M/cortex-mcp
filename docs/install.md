@@ -206,8 +206,8 @@ cosign verify "${IMAGE}@${DIGEST}" \
 echo "${IMAGE}:v${VERSION}@${DIGEST}"
 ```
 
-Put the printed reference in `compose.yaml`. The image index also carries an SBOM attestation, covered
-by the same signature:
+Put the printed reference in `compose.yaml`. The image index also carries an SBOM attestation and a
+build provenance attestation (added by buildx when it pushes), both covered by the same signature:
 `docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --format '{{ json .SBOM }}'`.
 
 ## Behind a reverse proxy

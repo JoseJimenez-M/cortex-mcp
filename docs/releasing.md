@@ -15,7 +15,7 @@ Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which runs GoReleas
 | `<archive>.sbom.json` | An SPDX SBOM per archive, made by syft from the binary's embedded module list |
 | `checksums.txt` | The SHA-256 of every archive and SBOM |
 | `checksums.txt.sigstore.json` | A keyless cosign signature bundle for `checksums.txt` |
-| `ghcr.io/josejimenez-m/cortex-mcp:vX.Y.Z` (and `:latest` unless the tag is a prerelease) | A multi-arch image (linux/amd64, linux/arm64) from the same binaries on distroless static, signed by digest with cosign, with a BuildKit SBOM attestation in its index |
+| `ghcr.io/josejimenez-m/cortex-mcp:vX.Y.Z` (and `:latest` unless the tag is a prerelease) | A multi-arch image (linux/amd64, linux/arm64) from the same binaries on distroless static, signed by digest with cosign, with a BuildKit SBOM attestation and the provenance attestation buildx adds on push in its index |
 
 The signing certificate's identity is
 `https://github.com/JoseJimenez-M/cortex-mcp/.github/workflows/release.yml@refs/tags/vX.Y.Z`, issued for
