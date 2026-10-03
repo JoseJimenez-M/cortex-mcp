@@ -112,9 +112,10 @@ and re-check the library behaviours listed in `internal/oauth/AGENTS.md`.
 
 Release tooling is not a Go dependency and is pinned where it runs: GitHub Actions by commit SHA,
 GoReleaser (v2.18.2) and syft (v1.54.0) by exact version in `.github/workflows/ci.yml` and
-`release.yml`, and the base image by digest in `Dockerfile`. Dependabot bumps the actions, the Go
-modules, and the base image; GoReleaser and syft are bumped by hand in both workflows
-(`docs/releasing.md`, "Maintenance").
+`release.yml`, BuildKit (the `setup-buildx-action` `driver-opts` in both workflows) and the SBOM
+scanner (`flags` in `.goreleaser.yaml`) by version and digest, and the base image by digest in
+`Dockerfile`. Dependabot bumps the actions, the Go modules, and the base image; GoReleaser, syft,
+BuildKit, and the scanner are bumped by hand (`docs/releasing.md`, "Maintenance").
 
 ## Workflow
 

@@ -159,6 +159,14 @@ file. Such an image is unsigned; prefer the release image.
   Dependabot. To update them, change `version:` of `goreleaser/goreleaser-action` and `syft-version:`
   of `anchore/sbom-action/download-syft` in both `.github/workflows/ci.yml` and
   `.github/workflows/release.yml`, then let the `release-config` job prove the snapshot still builds.
+- **BuildKit and the SBOM scanner** are pinned by version and index digest, not bumped by
+  Dependabot: the `driver-opts: image=moby/buildkit:...` line of `docker/setup-buildx-action` in both
+  workflows, and the `generator=docker.io/docker/buildkit-syft-scanner:...` flag in
+  `.goreleaser.yaml`. To update one, take the version its stable tag points to (`buildx-stable-1`,
+  `stable-1`), read the index digest with `docker buildx imagetools inspect <image>:<version>` (the
+  `Digest:` line) or `skopeo inspect --raw docker://docker.io/<image>:<version> | sha256sum`, and
+  update the version comment next to it. The scanner only runs on a real release (snapshots skip the
+  attestation); the `release-config` job checks that its reference resolves.
 - **Third-party notices.** Any change to the linked modules (a Dependabot Go bump included) makes
   CI fail until `THIRD_PARTY_NOTICES` is regenerated: run `go run ./tools/thirdpartynotices >
   THIRD_PARTY_NOTICES` and commit the result in the same pull request. It needs an official Go

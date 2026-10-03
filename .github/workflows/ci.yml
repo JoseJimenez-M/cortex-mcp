@@ -65,6 +65,11 @@ jobs:
       - name: actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit v0.33.1 (buildx-stable-1 on 2026-10-03), pinned by its
+          # index digest so a moved tag cannot change the builder. Bumped by
+          # hand in ci.yml and release.yml (docs/releasing.md, "Maintenance").
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           syft-version: v1.54.0
@@ -77,6 +82,13 @@ jobs:
           install-only: true
       - name: goreleaser check
         run: goreleaser check
+      - name: pinned SBOM scanner resolves
+        # Snapshots skip the SBOM attestation, so check here that the scanner
+        # reference in .goreleaser.yaml names an image that exists.
+        run: |
+          ref=$(grep -o 'generator=[^{}" ]*' .goreleaser.yaml | cut -d= -f2)
+          test -n "$ref"
+          docker buildx imagetools inspect "$ref"
       - name: goreleaser snapshot
         run: goreleaser release --snapshot --clean --skip=publish,sign
       - name: snapshot contents
