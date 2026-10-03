@@ -304,21 +304,31 @@ Recorded so they are not re-derived. Each has tests in `internal/oauth`, `intern
 - **Per-source limiters.** Code attempts on `/login` (TOTP and recovery codes) and the TOTP check of
   `/enroll/begin`, `/register`, `/authorize`, and CIMD first fetches charge a per-source bucket before the
   global one (login: 5 then 2 a minute per source, 10 a minute globally; registration: 5 then 1 every 6
-  minutes per source, 10 then 1 a minute globally; `/authorize`: 20 then 1 every 3 s per source, 60 then 1
-  a second globally; CIMD: 3 then 2 a minute per source, 10 a minute globally), so one source cannot spend
-  the whole budget and lock the owner out. When the global bucket refuses, the source's token is given
-  back. Passkey begin and finish charge only the per-source login bucket: a passkey cannot be guessed, so
-  sources draining the global code budget cannot block a passkey login; open WebAuthn ceremonies are
-  capped at 1024, above what the `/authorize` budget and the pending cap below can create within one
-  ceremony lifetime. `/enroll/begin` checks the enrollment link before charging anything, so junk is free.
+  minutes per source, 10 then 1 a minute globally; `/authorize`: 20 then 1 every 3 s per source, 600 then
+  10 a second globally; CIMD: 3 then 2 a minute per source, 10 a minute globally, plus a separate 5 then
+  1 every 10 s for documents on the host of an allowlisted https redirect, such as claude.ai), so one
+  source cannot spend the whole budget and lock the owner out. When the global bucket refuses, the
+  source's token is given back. The global `/authorize` bucket is a CPU circuit breaker only: disk is
+  bounded by the pending caps below. Passkey begin and finish charge only the per-source login bucket: a
+  passkey cannot be guessed, so sources draining the global code budget cannot block a passkey login.
+  Open WebAuthn ceremonies are capped at 1024; a new one evicts the oldest, so a flood cannot refuse the
+  owner's. `/enroll/begin` checks the enrollment link before charging anything, so junk is free.
+- **What a distributed attacker can still do** (accepted, single-owner server). Sources each spending
+  their own rate keep a global bucket empty: about 30 for `/authorize`, 5 for the code budget (TOTP
+  and recovery codes refused; passkeys still work), 6 for `/register`, 5 for CIMD first fetches and 3
+  for the app-host CIMD budget (with junk paths on that host); 200 sources holding
+  one pending request each evict the owner's pending request (the owner starts again); 1024 passkey
+  begins within the owner's ceremony evict it. None of these grants access; each delays a sign-in.
   Buckets are LRU-bounded at 4096 sources and IPv6 is grouped per /64. The source is the TCP peer, or the
   right-most untrusted `X-Forwarded-For` entry when the peer is in config `trusted_proxies` (each entry at
   least /8 for IPv4 or /32 for IPv6); no other header is read. With Caddy in Docker this trusts every
   container on that network, which is accepted for containers the owner runs.
 - **`/authorize` is GET only and bounded.** A cross-site POST arrives without the `SameSite=Lax` cookie
   and would overwrite the owner's browser binding mid-login, so POST gets 405. `state` is at most 2048
-  bytes and `nonce` 512. At most 20 pending (not yet approved) requests per client and 200 overall are
-  kept; beyond that the oldest pending one is deleted, never an approved one.
+  bytes and `nonce` 512. Pending (not yet approved) requests are capped per source (the rate-limit key,
+  stored in `auth_requests.source`): 10, the oldest going first. Beyond 200 overall, the oldest pending
+  request of the source holding the most is deleted, so a source with a single request (the owner) loses
+  it only once 200 sources each hold one. An approved request is never deleted.
 - **Codes and resource.** Authorization codes live 60 s (`codeTTL`). A used code is kept until
   `authRequestTTL` (10 minutes) after it was issued, so a late replay still revokes the family; the
   sweep runs from new flows (at most once a minute) and from the token endpoint (at most every 5
