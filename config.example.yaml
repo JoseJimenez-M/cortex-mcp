@@ -22,6 +22,18 @@ public_url: https://mcp.example.com
 # when public_url is https and this is not a loopback address.
 listen: "127.0.0.1:8080"
 
+# Reverse proxies (CIDR networks) whose X-Forwarded-For entry is believed
+# when the login page and client registration rate-limit per client
+# address. Empty (the default): the TCP peer is the client and the header is
+# ignored. When the peer is in this list, the right-most entry that is not
+# itself a listed proxy is the client, so list only proxies that append the
+# address they received from (Caddy does). Never list a network untrusted
+# hosts can send from: they could choose the address they are limited as.
+# Host bits must be zero; /0 is refused; at most 32 entries.
+# The VPS deployment sets this to the Docker network Caddy runs on, for
+# example 172.18.0.0/16 (docker network inspect <network> shows the subnet).
+trusted_proxies: []
+
 # Optional. A .md file inside the vault (vault-relative) whose content is
 # sent to every assistant as the MCP server instructions on connect. It is
 # re-read at most every 5 seconds, so edits reach new sessions without a

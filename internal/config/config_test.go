@@ -331,3 +331,41 @@ func TestBearerFalseNeedsOAuth(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestTrustedProxiesDefaultEmptyAndLoad(t *testing.T) {
+	if len(Default().TrustedProxies) != 0 {
+		t.Fatalf("default trusted_proxies = %v", Default().TrustedProxies)
+	}
+	c, err := Load(write(t, yamlFor(valid())+"trusted_proxies:\n  - 172.18.0.0/16\n  - fd00::/64\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(c.TrustedProxies, []string{"172.18.0.0/16", "fd00::/64"}) {
+		t.Fatalf("trusted_proxies = %v", c.TrustedProxies)
+	}
+}
+
+func TestCheckTrustedProxy(t *testing.T) {
+	for _, ok := range []string{"172.18.0.0/16", "127.0.0.1/32", "10.0.0.0/8", "fd00::/8", "::1/128"} {
+		if msg := CheckTrustedProxy(ok); msg != "" {
+			t.Errorf("%q rejected: %s", ok, msg)
+		}
+	}
+	for _, bad := range []string{"", "nope", "172.18.0.2", "172.18.0.1/16", "0.0.0.0/0", "::/0", "::ffff:10.0.0.0/104", "10.0.0.0/33", " 10.0.0.0/8", "fe80::%eth0/64"} {
+		if msg := CheckTrustedProxy(bad); msg == "" {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestValidateTrustedProxies(t *testing.T) {
+	c := valid()
+	c.TrustedProxies = []string{"10.0.0.0/8", "172.18.0.1/16"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_proxies[1]") {
+		t.Fatalf("err = %v", err)
+	}
+	c.TrustedProxies = slices.Repeat([]string{"10.0.0.0/8"}, 33)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_proxies:") {
+		t.Fatalf("err = %v", err)
+	}
+}

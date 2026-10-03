@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -35,6 +36,7 @@ const (
 
 	maxRedirectEntries    = 32
 	maxRedirectEntryBytes = 512
+	maxTrustedProxies     = 32
 )
 
 // Limits are the per-request and per-client ceilings.
@@ -83,9 +85,13 @@ type Config struct {
 	InstructionsFile string   `yaml:"instructions_file"`
 	Deny             []string `yaml:"deny"`
 	BearerTokens     bool     `yaml:"bearer_tokens"`
-	OAuth            OAuth    `yaml:"oauth"`
-	Limits           Limits   `yaml:"limits"`
-	Logs             Logs     `yaml:"logs"`
+	// TrustedProxies are the networks (CIDR) of reverse proxies whose
+	// X-Forwarded-For entry is believed when keying per-address rate limits.
+	// Empty (the default) means the TCP peer is the client.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	OAuth          OAuth    `yaml:"oauth"`
+	Limits         Limits   `yaml:"limits"`
+	Logs           Logs     `yaml:"logs"`
 }
 
 // Default returns the defaults; Load decodes the file on top of them, so a
@@ -242,6 +248,14 @@ func (c Config) Validate() error {
 			add("oauth.redirect_allowlist[%d] (%q): %s", i, e, msg)
 		}
 	}
+	if len(c.TrustedProxies) > maxTrustedProxies {
+		add("trusted_proxies: at most %d entries", maxTrustedProxies)
+	}
+	for i, p := range c.TrustedProxies {
+		if msg := CheckTrustedProxy(p); msg != "" {
+			add("trusted_proxies[%d] (%q): %s", i, p, msg)
+		}
+	}
 	if c.Limits.MaxWriteBytes <= 0 || c.Limits.MaxWriteBytes > maxWriteBytesCap {
 		add("limits.max_write_bytes: must be between 1 and %d (the vault cannot read back a larger note)", maxWriteBytesCap)
 	}
@@ -375,6 +389,31 @@ func checkDeny(d string) string {
 	}
 	if path.Clean(d) == "." {
 		return "refers to the vault root and would match nothing"
+	}
+	return ""
+}
+
+// CheckTrustedProxy validates one trusted_proxies entry and returns "" when
+// it is valid. It is the single definition: internal/oauth calls it before
+// parsing the list. An entry is a network in CIDR form with its host bits
+// zero ("172.18.0.0/16"; a single proxy is "172.18.0.2/32"), so the value
+// read is the network trusted. A /0 is refused: trusting every peer would
+// let any client choose the address its rate limit is keyed on. IPv4-mapped
+// IPv6 networks are refused because peers are compared in plain IPv4 form
+// and such an entry would silently match nothing.
+func CheckTrustedProxy(e string) string {
+	p, err := netip.ParsePrefix(e)
+	if err != nil {
+		return "must be a network in CIDR form, such as 172.18.0.0/16 (one address: 172.18.0.2/32)"
+	}
+	if p != p.Masked() {
+		return "host bits must be zero (write the network address, such as 172.18.0.0/16)"
+	}
+	if p.Bits() == 0 {
+		return "must not trust every address"
+	}
+	if p.Addr().Is4In6() {
+		return "use the plain IPv4 form instead of an IPv4-mapped IPv6 network"
 	}
 	return ""
 }
