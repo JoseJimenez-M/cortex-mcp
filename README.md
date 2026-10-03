@@ -129,18 +129,11 @@ claude.ai, ChatGPT, Meta Muse, and generic MCP clients are covered step by step 
 
 ## How it fits together
 
-```
- claude.ai   ChatGPT   Meta Muse   Claude Code   scripts
-     \          |          |            |          /
-      \         |   OAuth 2.1 / Bearer  |         /
-       +--------+----------+------------+--------+
-                           |
-                  TLS reverse proxy (Caddy, nginx)
-                           |
-                      cortex-mcp  ---- state_dir: auth.db (SQLite), writes.log
-                           |
-                    your vault (.md files)  <---- Obsidian, Syncthing, git, backups
-```
+<div align="center">
+
+<img src="docs/diagrams/cortex-mcp-overview.png" width="900" alt="How cortex-mcp fits together: assistants connect over HTTPS through a TLS reverse proxy to cortex-mcp, which keeps auth.db and writes.log in state_dir and reads and writes your vault of .md files; Obsidian, Syncthing, git, and backups work on the vault outside cortex-mcp" />
+
+</div>
 
 | Piece | Role |
 |-------|------|
