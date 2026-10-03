@@ -33,6 +33,12 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
 - **Every token lookup goes to the database.** `Service.Verify` decrypts only to learn the token id;
   expiry, audience, and client existence come from `access_tokens` joined with `grants` and
   `oauth_clients`. Never trust a decrypted payload alone (GHSA-j8gq-92xf-382c).
+- **Concurrent refresh: the loser revokes the family, by design.** Two requests presenting the same
+  refresh token race; the one that finds it already rotated revokes the whole family (RFC 9700) and
+  gets `invalid_grant`. There is no grace window: the server cannot replay the winner's tokens to the
+  loser, and a window would let an attacker holding a stolen family keep it alive. Each revocation logs
+  `refresh token reuse: grant revoked` (client id, family id). Revisit only if those logs show real
+  clients refreshing in parallel.
 - **Secrets are stored hashed** (`hashToken`): refresh tokens, codes, recovery codes, enrollment tokens,
   browser cookies. Only the TOTP secret and the keys in `oauth_keys` are stored usable.
 - **Errors that reach the library carry fixed text.** zitadel echoes some error strings to the browser

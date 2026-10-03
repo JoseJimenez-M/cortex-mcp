@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -22,6 +23,13 @@ var (
 	errRefreshReused      = errors.New("refresh token reused; the connection was revoked")
 	errUnsupportedRequest = errors.New("unsupported token request")
 )
+
+// reuseError is errRefreshReused with the identifiers the caller logs. It
+// carries ids only, never a token.
+type reuseError struct{ clientID, family string }
+
+func (reuseError) Error() string { return errRefreshReused.Error() }
+func (reuseError) Unwrap() error { return errRefreshReused }
 
 var _ op.Storage = (*opStorage)(nil)
 
@@ -123,7 +131,7 @@ func (s *Store) refreshByToken(token string) (*refreshRequest, error) {
 			if err := revokeFamilyTx(tx, family); err != nil {
 				return err
 			}
-			return keepErr{errRefreshReused}
+			return keepErr{reuseError{clientID, family}}
 		}
 		if expires <= s.unix() {
 			return errInvalidRefresh
@@ -141,7 +149,7 @@ func (s *Store) rotate(r *refreshRequest, presented string) (string, string, tim
 	var accessID, refresh string
 	var exp time.Time
 	err := s.tx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE refresh_tokens SET rotated = 1 WHERE hash = ? AND family = ? AND rotated = 0`, hashToken(presented), r.family)
+		res, err := tx.Exec(`UPDATE refresh_tokens SET rotated = 1 WHERE hash = ? AND family = ? AND rotated = 0 AND expires > ?`, hashToken(presented), r.family, s.unix())
 		if err != nil {
 			return err
 		}
@@ -149,7 +157,7 @@ func (s *Store) rotate(r *refreshRequest, presented string) (string, string, tim
 			if err := revokeFamilyTx(tx, r.family); err != nil {
 				return err
 			}
-			return keepErr{errRefreshReused}
+			return keepErr{reuseError{r.clientID, r.family}}
 		}
 		var grants int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM grants g JOIN oauth_clients c ON c.id = g.client_id WHERE g.family = ?`, r.family).Scan(&grants); err != nil {
@@ -179,7 +187,7 @@ func (s *Store) lookupAccess(id string) (accessInfo, error) {
 	var expires int64
 	err := s.db.QueryRow(`SELECT a.family, a.scopes, a.expires, g.client_id, g.audience, c.name
 		FROM access_tokens a JOIN grants g ON g.family = a.family JOIN oauth_clients c ON c.id = g.client_id
-		WHERE a.id = ?`, id).Scan(&a.Family, &scopes, &expires, &a.ClientID, &audience, &a.ClientName)
+		WHERE a.id = ? AND a.expires > ?`, id, s.unix()).Scan(&a.Family, &scopes, &expires, &a.ClientID, &audience, &a.ClientName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return accessInfo{}, ErrNotFound
 	}
@@ -238,9 +246,11 @@ func (o *opStorage) CreateAccessAndRefreshTokens(_ context.Context, req op.Token
 		}
 		id, refresh, exp, err := o.s.issueForCode(r, o.mcpURL)
 		if err != nil {
-			if !errors.Is(err, ErrNotFound) {
-				o.logger.Error("issue tokens failed", "err", err)
+			if errors.Is(err, ErrNotFound) {
+				o.logger.Warn("code exchange refused: the client, the redeemed code, or the family is gone", "client_id", r.ClientID, "family", r.Family)
+				return "", "", time.Time{}, oidc.ErrInvalidGrant().WithDescription("the authorization code is no longer valid").WithParent(ErrNotFound)
 			}
+			o.logger.Error("issue tokens failed", "err", err)
 			return "", "", time.Time{}, errStorage
 		}
 		return id, refresh, exp, nil
@@ -250,6 +260,7 @@ func (o *opStorage) CreateAccessAndRefreshTokens(_ context.Context, req op.Token
 		case err == nil:
 			return id, refresh, exp, nil
 		case errors.Is(err, errRefreshReused), errors.Is(err, errInvalidRefresh):
+			logReuse(o.logger, err)
 			return "", "", time.Time{}, oidc.ErrInvalidGrant().WithDescription("the refresh token is no longer valid").WithParent(err)
 		}
 		o.logger.Error("refresh rotation failed", "err", err)
@@ -261,6 +272,7 @@ func (o *opStorage) CreateAccessAndRefreshTokens(_ context.Context, req op.Token
 func (o *opStorage) TokenRequestByRefreshToken(_ context.Context, token string) (op.RefreshTokenRequest, error) {
 	r, err := o.s.refreshByToken(token)
 	if err != nil {
+		logReuse(o.logger, err)
 		if !errors.Is(err, errInvalidRefresh) && !errors.Is(err, errRefreshReused) {
 			o.logger.Error("refresh lookup failed", "err", err)
 			return nil, errStorage
@@ -314,3 +326,12 @@ func (o *opStorage) RevokeToken(_ context.Context, tokenOrID, _ string, clientID
 // TerminateSession serves end_session, which is not mounted. There are no
 // browser sessions to end: approval is per authorization request.
 func (o *opStorage) TerminateSession(context.Context, string, string) error { return nil }
+
+// logReuse records a revocation caused by a rotated refresh token being
+// presented again: the operator needs to see it, and it carries ids only.
+func logReuse(l *slog.Logger, err error) {
+	var re reuseError
+	if errors.As(err, &re) {
+		l.Warn("refresh token reuse: grant revoked", "client_id", re.clientID, "family", re.family)
+	}
+}

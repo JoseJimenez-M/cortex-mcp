@@ -1,9 +1,11 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -307,7 +309,7 @@ func TestCodeReplayRacingTheExchangeLeavesNoGrant(t *testing.T) {
 	if _, err := o.AuthRequestByCode(ctx, "code"); err == nil { // the replay
 		t.Fatal("replay accepted")
 	}
-	if _, _, _, err := o.CreateAccessAndRefreshTokens(ctx, a, ""); !errors.Is(err, errStorage) {
+	if _, _, _, err := o.CreateAccessAndRefreshTokens(ctx, a, ""); !isInvalidGrant(err) {
 		t.Fatalf("exchange after replay = %v", err)
 	}
 	if n := familyRows(t, s, a.Family); n != 0 {
@@ -323,7 +325,7 @@ func TestClientRevokedRacingTheExchangeLeavesNoGrant(t *testing.T) {
 	if err := s.RevokeClient("C"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := o.CreateAccessAndRefreshTokens(ctx, a, ""); !errors.Is(err, errStorage) {
+	if _, _, _, err := o.CreateAccessAndRefreshTokens(ctx, a, ""); !isInvalidGrant(err) {
 		t.Fatalf("exchange after revocation = %v", err)
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM grants`) + count(t, s, `SELECT COUNT(*) FROM access_tokens`) + count(t, s, `SELECT COUNT(*) FROM refresh_tokens`); n != 0 {
@@ -337,7 +339,7 @@ func TestExchangeWithoutRedeemedCodeIsRefused(t *testing.T) {
 	o, s, _ := newTestOP(t)
 	addClient(t, s, "C", "http://127.0.0.1/callback")
 	a := newApproved(t, o, "C", "http://127.0.0.1/callback")
-	if _, _, _, err := o.CreateAccessAndRefreshTokens(context.Background(), a, ""); !errors.Is(err, errStorage) {
+	if _, _, _, err := o.CreateAccessAndRefreshTokens(context.Background(), a, ""); !isInvalidGrant(err) {
 		t.Fatalf("err = %v", err)
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM grants`); n != 0 {
@@ -375,5 +377,73 @@ func TestRacingRotationIsInvalidGrant(t *testing.T) {
 	var oe *oidc.Error
 	if !errors.As(err, &oe) || oe.ErrorType != oidc.InvalidGrant {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func isInvalidGrant(err error) bool {
+	var oe *oidc.Error
+	return errors.As(err, &oe) && oe.ErrorType == oidc.InvalidGrant
+}
+
+func capture(o *opStorage) *bytes.Buffer {
+	var buf bytes.Buffer
+	o.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	return &buf
+}
+
+func TestReuseIsLoggedWithIdsOnly(t *testing.T) {
+	for _, racing := range []bool{false, true} {
+		o, s, _ := newTestOP(t)
+		addClient(t, s, "C", "http://127.0.0.1/callback")
+		_, r1, a := issue(t, o, "C")
+		buf := capture(o)
+		if racing {
+			req1, _ := o.TokenRequestByRefreshToken(context.Background(), r1)
+			req2, _ := o.TokenRequestByRefreshToken(context.Background(), r1)
+			_, _, _, _ = o.CreateAccessAndRefreshTokens(context.Background(), req1, r1)
+			_, _, _, _ = o.CreateAccessAndRefreshTokens(context.Background(), req2, r1)
+		} else {
+			_, r2 := refreshOnce(t, o, r1)
+			_ = r2
+			_, _ = o.TokenRequestByRefreshToken(context.Background(), r1)
+		}
+		log := buf.String()
+		if !strings.Contains(log, "refresh token reuse: grant revoked") || !strings.Contains(log, "client_id=C") || !strings.Contains(log, a.Family) {
+			t.Fatalf("racing=%v log = %q", racing, log)
+		}
+		if strings.Contains(log, refreshPrefix) || strings.Contains(log, r1) {
+			t.Fatal("a token appears in the log")
+		}
+	}
+}
+
+func TestGuardFailuresAreLogged(t *testing.T) {
+	o, s, _ := newTestOP(t)
+	addClient(t, s, "C", "http://127.0.0.1/callback")
+	a := newApproved(t, o, "C", "http://127.0.0.1/callback")
+	buf := capture(o)
+	if _, _, _, err := o.CreateAccessAndRefreshTokens(context.Background(), a, ""); !isInvalidGrant(err) {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(buf.String(), "code exchange refused") {
+		t.Fatalf("log = %q", buf.String())
+	}
+}
+
+func TestExpiredTokensAreRefusedInTheirOwnQueries(t *testing.T) {
+	o, s, clk := newTestOP(t)
+	addClient(t, s, "C", "http://127.0.0.1/callback")
+	id, r1, _ := issue(t, o, "C")
+	req, err := o.TokenRequestByRefreshToken(context.Background(), r1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(refreshTTL) // the refresh token expires after it was validated
+	if _, _, _, err := o.CreateAccessAndRefreshTokens(context.Background(), req, r1); err == nil {
+		t.Fatal("rotation of an expired refresh token succeeded")
+	}
+	// The access token row is still there (sweep has not run) but expired.
+	if _, err := s.lookupAccess(id); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired access lookup = %v", err)
 	}
 }
