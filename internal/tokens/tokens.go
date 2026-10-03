@@ -87,7 +87,10 @@ func New(db *sql.DB) *Store {
 
 // IsBearer reports whether s has the shape of a secret from Create. The
 // server uses it to route a presented token to this store or to OAuth
-// without a database lookup; OAuth access tokens never start with prefix.
+// without a database lookup. OAuth access tokens practically never start
+// with prefix (they are compact JWEs, which open with the base64url of a
+// JSON header, "eyJ"); one that did would only be refused (401), never
+// accepted as a Bearer token.
 func IsBearer(s string) bool { return strings.HasPrefix(s, prefix) }
 
 func hash(secret string) []byte {

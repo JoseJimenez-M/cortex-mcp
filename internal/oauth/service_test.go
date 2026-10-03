@@ -140,7 +140,7 @@ func (e *testEnv) startAuthorize(t *testing.T, c *http.Client, u string) string 
 
 func (e *testEnv) callback(t *testing.T, c *http.Client, id string) *url.URL {
 	t.Helper()
-	resp, err := c.Get(e.svc.callbackURL(id))
+	resp, err := c.Get(e.svc.login.callbackURL(id))
 	if err != nil {
 		t.Fatal(err)
 	}

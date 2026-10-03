@@ -257,7 +257,7 @@ func TestEnrollAndLoginWithPasskey(t *testing.T) {
 		t.Fatal("no passkey button once a passkey exists")
 	}
 	status, out := e.passkeyLogin(t, k, id, csrfOf(t, body), nil)
-	if status != http.StatusOK || out["redirect"] != e.svc.callbackURL(id) {
+	if status != http.StatusOK || out["redirect"] != e.svc.login.callbackURL(id) {
 		t.Fatalf("passkey login: %d %v", status, out)
 	}
 	code := e.callback(t, e.browser, id).Query().Get("code")

@@ -91,7 +91,7 @@ func (e *testEnv) loginWithTOTP(t *testing.T, c *http.Client, clientID string, p
 		t.Fatalf("login page: %d %s", status, body)
 	}
 	status, body, resp := postPage(t, c, e.url+"/login", url.Values{"id": {id}, "csrf": {csrfOf(t, body)}, "code": {e.totpNow(t)}})
-	if status != http.StatusSeeOther || resp.Header.Get("Location") != e.svc.callbackURL(id) {
+	if status != http.StatusSeeOther || resp.Header.Get("Location") != e.svc.login.callbackURL(id) {
 		t.Fatalf("login: %d %q %s", status, resp.Header.Get("Location"), body)
 	}
 	return e.callback(t, c, id).Query().Get("code")
