@@ -174,7 +174,7 @@ func TestAuthorizeIsGetOnly(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != http.MethodGet ||
 		resp.Header.Get("Set-Cookie") != "" || resp.Header.Get("Location") != "" {
-		t.Fatalf("POST /authorize: %d, Allow %q, Set-Cookie %q", resp.StatusCode, resp.Header.Get("Allow"), resp.Header.Get("Set-Cookie"))
+		t.Fatalf("POST /authorize: %d, Allow %q, sets a cookie %v", resp.StatusCode, resp.Header.Get("Allow"), resp.Header.Get("Set-Cookie") != "")
 	}
 	if n := countRows(t, e.svc.store, "auth_requests"); n != 0 {
 		t.Fatalf("POST /authorize stored %d requests", n)

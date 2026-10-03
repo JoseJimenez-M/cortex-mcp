@@ -407,7 +407,7 @@ func TestBrowserCookieAndCallbackBinding(t *testing.T) {
 	sc := resp.Header.Get("Set-Cookie")
 	for _, attr := range []string{browserCookie + "=", "Path=/", "Max-Age=3600", "HttpOnly", "Secure", "SameSite=Lax"} {
 		if !strings.Contains(sc, attr) {
-			t.Errorf("Set-Cookie %q lacks %s", sc, attr)
+			t.Errorf("Set-Cookie lacks %s", attr)
 		}
 	}
 	id := locationOf(t, resp).Query().Get("id")
