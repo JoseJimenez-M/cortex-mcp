@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math"
 	"mime"
 	"net/http"
-	"strconv"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -21,6 +19,14 @@ const (
 	// client per connection, so this is the squatting surface; clients with
 	// a grant are the owner's real connections and never count.
 	maxUnusedDCR = 50
+
+	// Registration rate: a global bucket of registerGlobalBurst refilled
+	// once a minute, and in front of it a bucket per source of
+	// registerPerIPBurst refilled every registerPerIPEvery, so one source
+	// cannot take the whole global budget.
+	registerGlobalBurst = 10
+	registerPerIPBurst  = 5
+	registerPerIPEvery  = 6 * time.Minute
 )
 
 // registration is the part of an RFC 7591 request this server uses. Every
@@ -61,19 +67,36 @@ type registrationResponse struct {
 
 // registrar serves POST /register.
 type registrar struct {
-	store *Store
-	allow allowlist
-	limit *rate.Limiter
+	store   *Store
+	allow   allowlist
+	limit   *rate.Limiter // global
+	perIP   *ipLimiter
+	proxies trustedProxies // set by New; empty means the TCP peer is the source
 }
 
-// newRegistrar allows 60 valid registrations an hour with a burst of 10.
-// The ceiling is global, not per client address (behind a proxy the address
-// is not trustworthy), so it is generous for the owner's few assistants
-// reconnecting while still bounding how fast an attacker can churn the
-// table. Only requests that pass validation are charged (see ServeHTTP), so
-// junk cannot starve real registrations.
+// newRegistrar allows 60 valid registrations an hour with a burst of 10
+// overall, and 10 an hour with a burst of 5 per source address (see
+// clientIP: behind a proxy the address counts only when the proxy is in
+// trusted_proxies). The global ceiling is generous for the owner's few
+// assistants reconnecting while still bounding how fast an attacker can
+// churn the table; the per-source one keeps a single source from spending
+// all of it. Only requests that pass validation are charged (see
+// ServeHTTP), so junk cannot starve real registrations.
 func newRegistrar(store *Store, allow allowlist) *registrar {
-	return &registrar{store: store, allow: allow, limit: rate.NewLimiter(rate.Every(time.Minute), 10)}
+	return &registrar{
+		store: store, allow: allow,
+		limit: rate.NewLimiter(rate.Every(time.Minute), registerGlobalBurst),
+		perIP: newIPLimiter(registerPerIPEvery, registerPerIPBurst, ipLimiterSize),
+	}
+}
+
+// admit charges the source's bucket, then the global one. A request the
+// source bucket refuses never reaches the global bucket.
+func (g *registrar) admit(r *http.Request) (time.Duration, bool) {
+	if d, ok := g.perIP.allow(g.proxies.clientIP(r)); !ok {
+		return d, false
+	}
+	return reserveNow(g.limit)
 }
 
 func (g *registrar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -92,11 +115,8 @@ func (g *registrar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Charge the limiter only now: invalid requests are rejected for free.
-	res := g.limit.Reserve()
-	if d := res.Delay(); !res.OK() || d > 0 {
-		res.Cancel()
-		secs := max(1, int(math.Ceil(d.Seconds())))
-		w.Header().Set("Retry-After", strconv.Itoa(secs))
+	if d, ok := g.admit(r); !ok {
+		w.Header().Set("Retry-After", retryAfter(d))
 		oauthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many registrations, try again later")
 		return
 	}

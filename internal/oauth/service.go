@@ -39,6 +39,7 @@ type Options struct {
 	DB                *sql.DB  // from authdb.Open, shared with the Bearer token store
 	PublicURL         string   // config public_url; the issuer is this without a trailing slash
 	RedirectAllowlist []string // config oauth.redirect_allowlist
+	TrustedProxies    []string // config trusted_proxies: proxies whose X-Forwarded-For entry keys rate limits
 	Logger            *slog.Logger
 	Now               func() time.Time // nil means time.Now
 
@@ -63,6 +64,7 @@ type Service struct {
 	provider *op.Provider
 	crypto   op.Crypto
 	reg      *registrar
+	login    *loginPages
 	op       *opStorage
 	allow    allowlist
 	logger   *slog.Logger
@@ -84,6 +86,10 @@ func New(o Options) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("oauth: %w", err)
 	}
+	proxies, err := parseTrustedProxies(o.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: %w", err)
+	}
 	store := NewStore(o.DB, o.Now)
 	signing, cryptoKey, cryptoKID, err := store.loadKeys()
 	if err != nil {
@@ -102,6 +108,9 @@ func New(o Options) (*Service, error) {
 		allow:  allow,
 		logger: o.Logger,
 	}
+	s.reg.proxies = proxies
+	s.login = newLoginPages(store, base, o.Logger)
+	s.login.proxies = proxies
 	s.op = &opStorage{
 		s: store, base: base, mcpURL: s.mcpURL, allow: allow,
 		resolver: newCIMDResolver(store, allow, fetch, o.Logger), signing: signing, logger: o.Logger,
@@ -156,6 +165,9 @@ func (s *Service) Register(mux *http.ServeMux) {
 	handle("POST /revoke", http.HandlerFunc(s.revoke))
 	handle("GET /keys", s.provider)
 	handle("POST /register", s.reg)
+	handle("GET /login", http.HandlerFunc(s.login.show))
+	handle("POST /login", http.HandlerFunc(s.login.submit))
+	handle("POST /login/deny", http.HandlerFunc(s.login.deny))
 }
 
 // protectedResourceMetadata is RFC 9728. offline_access is deliberately

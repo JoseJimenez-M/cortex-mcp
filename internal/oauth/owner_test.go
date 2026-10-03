@@ -119,6 +119,24 @@ func TestRecoveryCodesAreSingleUseAndForgiving(t *testing.T) {
 	}
 }
 
+// Recovery codes are base32, which has no 0, 1 or 8: those are read as the
+// letters they look like.
+func TestRecoveryCodeLookAlikes(t *testing.T) {
+	if got := normalizeRecovery("0i1o-8b -l2"); got != "OIIOBBL2" {
+		t.Fatalf("normalizeRecovery = %q", got)
+	}
+	s, _ := newTestStore(t)
+	if _, err := s.Setup("h"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO recovery_codes(hash) VALUES(?)`, hashToken("OIBAOIBAOIBAOIBA")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.verifyCode("01ba-oi8a-0IBA-o1bA"); err != nil {
+		t.Fatalf("code typed with look-alikes = %v", err)
+	}
+}
+
 func TestCodesNeedAnOwner(t *testing.T) {
 	s, _ := newTestStore(t)
 	if _, err := s.verifyCode("123456"); !errors.Is(err, ErrNotSetUp) {

@@ -31,6 +31,12 @@ type testEnv struct {
 // "localhost" because WebAuthn refuses IP addresses as relying party ids.
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
+	return newTestEnvWith(t, nil)
+}
+
+// newTestEnvWith lets a test change the Options before the Service is built.
+func newTestEnvWith(t *testing.T, opts func(*Options)) *testEnv {
+	t.Helper()
 	var h http.Handler
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r) }))
 	t.Cleanup(ts.Close)
@@ -42,8 +48,12 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	clk := newTestClock()
-	svc, err := New(Options{DB: db, PublicURL: base + "/", RedirectAllowlist: config.DefaultRedirectAllowlist(), Logger: discardLogger, Now: clk.Now,
-		fetch: (&fakeFetch{err: errors.New("offline")}).fetch})
+	o := Options{DB: db, PublicURL: base + "/", RedirectAllowlist: config.DefaultRedirectAllowlist(), Logger: discardLogger, Now: clk.Now,
+		fetch: (&fakeFetch{err: errors.New("offline")}).fetch}
+	if opts != nil {
+		opts(&o)
+	}
+	svc, err := New(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,6 +519,9 @@ func TestNewRejectsBadOptions(t *testing.T) {
 	}
 	if _, err := New(Options{DB: db, PublicURL: "not a url", RedirectAllowlist: []string{"loopback"}}); err == nil {
 		t.Fatal("bad public URL accepted")
+	}
+	if _, err := New(Options{DB: db, PublicURL: "https://x.example", RedirectAllowlist: []string{"loopback"}, TrustedProxies: []string{"0.0.0.0/0"}}); err == nil {
+		t.Fatal("trusting every address accepted")
 	}
 }
 

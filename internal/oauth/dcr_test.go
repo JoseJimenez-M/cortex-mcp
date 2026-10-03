@@ -85,19 +85,77 @@ func TestRegisterRejects(t *testing.T) {
 	}
 }
 
+func postRegisterFrom(t *testing.T, h http.Handler, remote, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = remote
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// The global ceiling holds across sources.
 func TestRegisterIsRateLimited(t *testing.T) {
 	s, _ := newTestStore(t)
 	h := newRegistrar(s, defaultAllowlist(t))
 	body := `{"redirect_uris":["http://127.0.0.1/callback"]}`
-	for i := 0; i < 10; i++ {
-		if rec, _ := postRegister(t, h, "application/json", body); rec.Code != http.StatusCreated {
+	for i := 0; i < registerGlobalBurst; i++ {
+		if rec := postRegisterFrom(t, h, fmt.Sprintf("203.0.113.%d:1234", i), body); rec.Code != http.StatusCreated {
 			t.Fatalf("request %d: %d", i, rec.Code)
 		}
 	}
-	rec, out := postRegister(t, h, "application/json", body)
+	rec := postRegisterFrom(t, h, "198.51.100.1:1234", body)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
 	ra, err := strconv.Atoi(rec.Header().Get("Retry-After"))
 	if rec.Code != http.StatusTooManyRequests || err != nil || ra < 1 || ra > 60 || out["error"] == nil {
-		t.Fatalf("11th request: %d %q %v", rec.Code, rec.Header().Get("Retry-After"), out)
+		t.Fatalf("request past the global burst: %d %q %v", rec.Code, rec.Header().Get("Retry-After"), out)
+	}
+}
+
+// One source exhausting its own bucket leaves the others, and the global
+// bucket, untouched.
+func TestRegisterIsRateLimitedPerSource(t *testing.T) {
+	s, _ := newTestStore(t)
+	h := newRegistrar(s, defaultAllowlist(t))
+	body := `{"redirect_uris":["http://127.0.0.1/callback"]}`
+	for i := 0; i < registerPerIPBurst; i++ {
+		if rec := postRegisterFrom(t, h, "203.0.113.1:1234", body); rec.Code != http.StatusCreated {
+			t.Fatalf("request %d: %d", i, rec.Code)
+		}
+	}
+	rec := postRegisterFrom(t, h, "203.0.113.1:999", body)
+	if ra, err := strconv.Atoi(rec.Header().Get("Retry-After")); rec.Code != http.StatusTooManyRequests || err != nil || ra < 1 {
+		t.Fatalf("past the per-source burst: %d %q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	if rec := postRegisterFrom(t, h, "203.0.113.2:1234", body); rec.Code != http.StatusCreated {
+		t.Fatalf("another source: %d", rec.Code)
+	}
+	if got := h.limit.Tokens(); got < float64(registerGlobalBurst-registerPerIPBurst-1)-0.5 {
+		t.Fatalf("refused requests drew on the global bucket: %.1f tokens left", got)
+	}
+}
+
+// Without trusted proxies, X-Forwarded-For does not pick the bucket.
+func TestRegisterIgnoresForwardedForFromUntrustedPeer(t *testing.T) {
+	s, _ := newTestStore(t)
+	h := newRegistrar(s, defaultAllowlist(t))
+	body := `{"redirect_uris":["http://127.0.0.1/callback"]}`
+	for i := 0; i <= registerPerIPBurst; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
+		req.RemoteAddr = "203.0.113.1:1234"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		want := http.StatusCreated
+		if i == registerPerIPBurst {
+			want = http.StatusTooManyRequests
+		}
+		if rec.Code != want {
+			t.Fatalf("request %d: %d, want %d", i, rec.Code, want)
+		}
 	}
 }
 
@@ -159,7 +217,9 @@ func TestClientsWithGrantsAreNeverEvictedOrCounted(t *testing.T) {
 			t.Fatalf("registration %d: %d", i, rec.Code)
 		}
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM oauth_clients WHERE id LIKE 'U%'`); n != maxUnusedDCR {
+	// Seeded ids are U0000..U0049 (five characters); registered ids are 26
+	// random base32 characters and may also start with U.
+	if n := count(t, s, `SELECT COUNT(*) FROM oauth_clients WHERE id LIKE 'U____'`); n != maxUnusedDCR {
 		t.Fatalf("a client with a grant was evicted: %d left", n)
 	}
 }

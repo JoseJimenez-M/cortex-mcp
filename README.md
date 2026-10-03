@@ -123,6 +123,11 @@ mcp.example.com {
 
 `flush_interval -1` disables response buffering so streamed (SSE) responses reach the client at once.
 
+The login page and client registration are rate-limited per client address. Behind a proxy every
+request comes from the proxy's address, so set `trusted_proxies` to the proxy's network (in a Docker
+deployment, the subnet of the network Caddy shares with the server); without it all clients share one
+bucket per limiter, which is safe but coarser.
+
 ## Connect Claude Code
 
 ```bash

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -20,6 +21,11 @@ const (
 var (
 	errBadCode    = errors.New("code not accepted")
 	errTOTPLocked = errors.New("authenticator codes are locked after too many failures")
+	// errTOTPJustLocked is the bad code that reached maxTOTPFailures. It
+	// wraps errBadCode; it is returned once per lock (the count only moves
+	// from maxTOTPFailures-1 to maxTOTPFailures once until a reset), so the
+	// caller can log the event once.
+	errTOTPJustLocked = fmt.Errorf("%w; authenticator codes are now locked", errBadCode)
 )
 
 // SetupSecrets are shown once by cortex-mcp setup and never again.
@@ -154,6 +160,9 @@ func (s *Store) verifyTOTP(code string) error {
 			if _, err := tx.Exec(`UPDATE owner SET totp_failures = totp_failures + 1 WHERE id = 1`); err != nil {
 				return err
 			}
+			if fails+1 >= maxTOTPFailures {
+				return keepErr{errTOTPJustLocked}
+			}
 			return keepErr{errBadCode}
 		}
 		_, err = tx.Exec(`UPDATE owner SET totp_last_step = ?, totp_failures = 0 WHERE id = 1`, step)
@@ -228,9 +237,12 @@ func newRecoveryCode() string {
 	return t[0:4] + "-" + t[4:8] + "-" + t[8:12] + "-" + t[12:16]
 }
 
+// recoveryReplacer drops separators and maps the digits that are not in the
+// base32 alphabet (A-Z, 2-7) to the letters they are mistaken for.
+var recoveryReplacer = strings.NewReplacer("-", "", " ", "", "0", "O", "1", "I", "8", "B")
+
 // normalizeRecovery accepts the code as typed: any case, with or without
-// dashes and spaces.
+// dashes and spaces, and with 0, 1 or 8 for O, I or B.
 func normalizeRecovery(s string) string {
-	s = strings.ToUpper(s)
-	return strings.NewReplacer("-", "", " ", "").Replace(s)
+	return recoveryReplacer.Replace(strings.ToUpper(s))
 }
