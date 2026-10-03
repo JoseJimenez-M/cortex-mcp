@@ -70,18 +70,27 @@ file but never change, move, or delete it.
   redirect URIs on `oauth.redirect_allowlist` (by default claude.ai, ChatGPT, Meta Muse, and loopback for
   native apps). Redirect URIs are compared exactly, never normalized. Metadata documents are fetched
   over https on port 443 only, never from private, loopback, or other non-public addresses, without
-  following redirects, within 5 seconds and 64 KiB, at most 10 new fetches a minute, and cached for 1
-  hour. If the document host is briefly unreachable, a client that already has a connection keeps
-  working from the cache for up to 24 hours; a well-formed document that is refused (a redirect URI
-  off the allowlist, a different client id) ends it at once.
+  following redirects, within 5 seconds and 64 KiB, at most 10 new fetches a minute (and 3, then 2 a
+  minute, per source address), and cached for 1 hour. Redirect URIs in a document that are not on the
+  allowlist are dropped and the rest kept. If the document host is briefly unreachable, a client that
+  already has a connection keeps working from the cache for up to 24 hours; a well-formed document
+  that is refused (no allowed redirect URI left, a different client id, a confidential client) ends it
+  at once. Logs name a metadata document client by its host only.
+- `/authorize` accepts GET only, and every request is rate limited per source address (20, then 1
+  every 3 seconds) and globally (60, then 1 a second). `state` may be at most 2048 bytes and `nonce` 512.
+  At most 20 sign-in requests per client, and 200 overall, wait for approval at once; beyond that the
+  oldest waiting one is dropped (an approved one never is).
 - `/register` is rate limited per source address (5, then 1 every 6 minutes) and globally (10, then 1 a
   minute). At most 50 registered clients that never completed a login are kept; when full, the oldest
   one older than 10 minutes is evicted. Clients with a connection never count and are never evicted.
 - The login page is bound to the browser that started the authorization (a `Secure`, `HttpOnly`,
   `SameSite=Lax` cookie), carries a per-request CSRF token, cannot be framed (CSP `frame-ancestors
   'none'` with a per-page nonce), and names the client, its redirect host, and (for metadata documents)
-  the host that published it. Login attempts with any factor are limited per source address (5, then 2
-  a minute) and globally (10 a minute).
+  the host that published it. Attempts with a code (authenticator or recovery code, and the code on the
+  passkey registration page) are limited per source address (5, then 2 a minute) and globally (10 a
+  minute). Passkey sign-in steps draw only on the same per-source budget: a passkey cannot be guessed,
+  so a few sources spending the global code budget cannot keep you from approving with a passkey. When
+  the global budget refuses a request, the source's own budget is not charged.
 - The owner logs in with a passkey (WebAuthn, user verification required, signature counter checked for
   cloned authenticators), a TOTP code (a time step is accepted once), or one of ten single-use recovery
   codes. After 50 consecutive wrong TOTP codes the TOTP factor locks until a passkey or recovery code
@@ -181,12 +190,14 @@ mcp.example.com {
 
 `flush_interval -1` disables response buffering so streamed (SSE) responses reach the client at once.
 
-The login page and client registration are rate-limited per client address. Behind a proxy every
+The OAuth endpoints (`/authorize`, the login page, client registration, metadata document fetches)
+are rate-limited per client address. Behind a proxy every
 request comes from the proxy's address, so set `trusted_proxies` to the proxy's network; without it all
 clients share one bucket per limiter, which is safe but coarser. The server then reads
 `X-Forwarded-For` only from a TCP peer inside `trusted_proxies`, and takes the right-most entry that is
 not itself a listed proxy, so list only proxies that append the address they received from (Caddy
-does), and never a network that untrusted hosts can send from.
+does), and never a network that untrusted hosts can send from. Entries wider than /8 (IPv4) or /32
+(IPv6) are refused.
 
 ### Caddy and cortex-mcp in Docker
 
@@ -203,6 +214,11 @@ listen: ":8080"
 trusted_proxies: [172.18.0.0/16]   # the subnet printed above
 ```
 
+This trusts every container on that network, not only Caddy (Vaultwarden or any other service you run
+there too): any of them could set `X-Forwarded-For` and pick its own rate-limit bucket. That is
+acceptable for containers you run yourself, since the global limits still cap them all; give
+cortex-mcp and Caddy a network of their own if another container there is not trusted.
+
 The Caddyfile then uses `reverse_proxy cortex-mcp:8080` with the same `flush_interval -1`. `serve` logs
 a warning for the non-loopback `listen`, which is expected in a container. Run the owner commands inside
 the container, for example `docker compose exec cortex-mcp /cortex-mcp setup -config
@@ -213,12 +229,16 @@ the container, for example `docker compose exec cortex-mcp /cortex-mcp setup -co
 The first time this version opens `state_dir/auth.db` (`serve` or any command) it migrates the file
 from schema version 2 to 3 (it adds the OAuth tables; Bearer tokens are kept). The plan 1 binary refuses a version 3 database, so a rollback
 needs the old file. Stop the server and back up `auth.db` together with `auth.db-wal` and `auth.db-shm`
-(when present) before upgrading, then start the new binary and run `setup`.
+(when present) before upgrading, then start the new binary and run `setup`. The backup is a live
+credential: putting it back brings back every Bearer token it holds, including any revoked since (and a
+copy of a later `auth.db` also holds the TOTP secret and the OAuth keys in usable form). Keep it as
+private as `state_dir`, and delete it once the upgrade is verified.
 
 ## Connect assistant apps (OAuth)
 
 Run `cortex-mcp setup` once on the host and register a passkey with the link it prints. Then add the
-server in the app with the MCP URL `https://mcp.example.com/mcp`:
+server in the app with the MCP URL `https://mcp.example.com/mcp`, pasted exactly as shown: no trailing
+slash (the token is bound to this exact URL, and `.../mcp/` is a different resource):
 
 - **claude.ai** (web, desktop, and mobile): Settings, Connectors, Add custom connector, paste the URL.
   claude.ai registers itself with a client ID metadata document or through `/register`; either works.
@@ -231,6 +251,10 @@ metadata document, the host that published it), then approve with your passkey, 
 or a recovery code. `cortex-mcp clients list` then shows the connection, and `cortex-mcp clients revoke
 ID` ends it. Each app connection is labelled in `writes.log` with the name the app registered; the name
 is chosen by the app, so the redirect host on the login page is what identifies it.
+
+Never approve a sign-in that you did not start yourself, just now, from your own assistant, even if the
+redirect host is `claude.ai` or another app you use: anyone can start a sign-in for such an app and send
+you the link, and approving it would connect their account to your vault.
 
 ## Connect Claude Code
 

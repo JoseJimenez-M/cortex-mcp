@@ -207,7 +207,8 @@ first `authorization_servers` entry:
   `registration_endpoint`, `client_id_metadata_document_supported: true`,
   `authorization_response_iss_parameter_supported: true`, scopes `vault` and `offline_access`.
 - **The library serves** `/authorize`, `/authorize/callback`, `/oauth/token`, `/revoke`, `/keys`
-  (only because it always mints an ID token: one EdDSA/ES256 key in the auth state).
+  (only because it always mints an ID token: one ES256 key in the auth state; ES256 is the only
+  signing algorithm advertised or used).
 - **Our code adds**, each with tests: S256-only PKCE (`plain` and missing challenges rejected, since
   the library accepts `plain` by default); RFC 8707 `resource` on authorize and token requests, bound
   as the token audience and checked on every MCP request; the RFC 9207 `iss` parameter on every
@@ -226,8 +227,9 @@ first `authorization_servers` entry:
   get refresh tokens; presenting a used refresh token or a used code revokes the whole token family;
   `/revoke` and `clients revoke` end the whole connection; `oauth.enabled` defaults to true (login
   refuses until `setup` has run) and `false` removes every OAuth route; CIMD fetches are limited to
-  https on port 443, public addresses, no redirects, 5 s, 64 KiB, 10 new fetches a minute, cached 1
-  hour; `/register` is limited per source and globally (6.6) and keeps at most 50 never-used clients; no
+  https on port 443, public addresses, no redirects, 5 s, 64 KiB, 10 new fetches a minute (and per
+  source, 6.6), cached 1 hour; `/authorize` and `/register` are limited per source and globally (6.6),
+  and `/register` keeps at most 50 never-used clients; no
   CORS on any endpoint; after 50 consecutive wrong TOTP codes the TOTP factor locks until a passkey or
   recovery code login (or `cortex-mcp unlock-totp` on the host).
 - **Tokens:** access tokens valid 1 hour, refresh tokens 30 days, rotated on use; the resource server
@@ -273,8 +275,12 @@ Recorded so they are not re-derived. Each has tests in `internal/oauth`, `intern
   case-insensitively and in map order, so `REDIRECT_URI` could override the `redirect_uri` our pre-check
   validated. `/authorize`, `/oauth/token`, and `/revoke` hand the library only exact known keys and
   refuse case variants and repeats; `/authorize` refuses any `response_type` but `code`, and
-  `public_url` must be canonical (lowercase, no trailing dot, no default port) so the exact issuer and
-  resource comparisons hold.
+  `public_url` must be canonical (lowercase, ASCII with internationalized names in punycode, no trailing
+  dot, no default port) so the exact issuer and resource comparisons hold.
+- **Login page CSP for IPv6 loopback clients.** `form-action` names the client's redirect origin
+  because browsers apply it to the redirect chain after the login form. The CSP grammar has no IPv6
+  literals, so for a `http://[::1]:port` redirect the page uses the scheme-source `http:` instead (the
+  narrowest source browsers accept); the forms there post only to this server.
 - **Registration eviction of never-used clients.** `/register` is unauthenticated and claude.ai registers
   a new client per connection, so only clients without a grant count against a cap of 50. When full, the
   oldest never-used client created at least 10 minutes ago is evicted (never one with an owner-approved
@@ -284,19 +290,42 @@ Recorded so they are not re-derived. Each has tests in `internal/oauth`, `intern
   metadata document for up to 24 hours when the document host cannot be reached (an outage, or an
   attacker exhausting the shared fetch budget), with its own refetch budget. Transport failures, non-200
   answers, and bodies that are not a JSON object count as unreachable (a broken or hijacked host can serve
-  them cheaply); only a well-formed document that policy refuses (client id mismatch, a redirect URI off
-  the allowlist, a non-public auth method) revokes the client at once. Clients without a grant get no
+  them cheaply); only a well-formed document that policy refuses (client id mismatch, no allowed
+  redirect URI left, a non-public auth method) revokes the client at once. Clients without a grant get no
   stale-serve.
+- **CIMD redirect filtering.** A metadata document's redirect URIs that are off the allowlist are
+  dropped and the rest kept (a publisher may list callbacks for other servers); the kept set must still
+  be 1 to 10 URIs, all loopback or none. Logs name a CIMD client by its URL's host only (at most 253
+  bytes), since the rest of the URL is chosen by whoever sends `/authorize`.
 - **Rate key versus display name.** The `/mcp` rate limit keys on `Extra["ratekey"]`: `bearer:` plus the
   token name, or the OAuth grant family. `Extra["client"]` (the token name or the sanitized OAuth client
   name) only labels logs and `writes.log`. OAuth client names are chosen freely by registrations and two
   may share one, so a name never keys a limit, a session, or a revocation by itself.
-- **Per-source limiters.** `/login` (every factor, including passkey begins and `/enroll/begin`) and
-  `/register` charge a per-source bucket before the global one (login: 5 then 2 a minute per source, 10 a
-  minute globally; registration: 5 then 1 every 6 minutes per source, 10 then 1 a minute globally), so one
-  source cannot spend the whole budget and lock the owner out. Buckets are LRU-bounded at 4096 sources and
-  IPv6 is grouped per /64. The source is the TCP peer, or the right-most untrusted `X-Forwarded-For` entry
-  when the peer is in config `trusted_proxies`; no other header is read.
+- **Per-source limiters.** Code attempts on `/login` (TOTP and recovery codes) and the TOTP check of
+  `/enroll/begin`, `/register`, `/authorize`, and CIMD first fetches charge a per-source bucket before the
+  global one (login: 5 then 2 a minute per source, 10 a minute globally; registration: 5 then 1 every 6
+  minutes per source, 10 then 1 a minute globally; `/authorize`: 20 then 1 every 3 s per source, 60 then 1
+  a second globally; CIMD: 3 then 2 a minute per source, 10 a minute globally), so one source cannot spend
+  the whole budget and lock the owner out. When the global bucket refuses, the source's token is given
+  back. Passkey begin and finish charge only the per-source login bucket: a passkey cannot be guessed, so
+  sources draining the global code budget cannot block a passkey login; open WebAuthn ceremonies are
+  capped at 1024, above what the `/authorize` budget and the pending cap below can create within one
+  ceremony lifetime. `/enroll/begin` checks the enrollment link before charging anything, so junk is free.
+  Buckets are LRU-bounded at 4096 sources and IPv6 is grouped per /64. The source is the TCP peer, or the
+  right-most untrusted `X-Forwarded-For` entry when the peer is in config `trusted_proxies` (each entry at
+  least /8 for IPv4 or /32 for IPv6); no other header is read. With Caddy in Docker this trusts every
+  container on that network, which is accepted for containers the owner runs.
+- **`/authorize` is GET only and bounded.** A cross-site POST arrives without the `SameSite=Lax` cookie
+  and would overwrite the owner's browser binding mid-login, so POST gets 405. `state` is at most 2048
+  bytes and `nonce` 512. At most 20 pending (not yet approved) requests per client and 200 overall are
+  kept; beyond that the oldest pending one is deleted, never an approved one.
+- **Codes and resource.** Authorization codes live 60 s (`codeTTL`). A used code is kept until
+  `authRequestTTL` (10 minutes) after it was issued, so a late replay still revokes the family; the
+  sweep runs from new flows (at most once a minute) and from the token endpoint (at most every 5
+  minutes), and logs a failure at Warn. The `resource` parameter must be the MCP URL byte for byte (no
+  trailing slash, no case change). Junk codes and refresh tokens are refused with a read, never waiting
+  for the write lock. A token request from a client that no longer exists (revoked, or after
+  `reset-auth`) gets `invalid_client` (401).
 - **`setup -force` semantics.** It replaces the passkeys, TOTP secret, recovery codes, and enrollment
   links in one transaction (never a moment with both sets, or none, valid) and drops approvals the old
   factors gave that are not yet a grant (approved requests and unused codes). Used codes stay for replay

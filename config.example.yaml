@@ -23,15 +23,18 @@ public_url: https://mcp.example.com
 listen: "127.0.0.1:8080"
 
 # Reverse proxies (CIDR networks) whose X-Forwarded-For entry is believed
-# when the login page and client registration rate-limit per client
-# address. Empty (the default): the TCP peer is the client and the header is
+# when the OAuth endpoints (authorization, login page, client registration,
+# metadata document fetches) rate-limit per client address. Empty (the default): the TCP peer is the client and the header is
 # ignored. When the peer is in this list, the right-most entry that is not
 # itself a listed proxy is the client, so list only proxies that append the
 # address they received from (Caddy does). Never list a network untrusted
 # hosts can send from: they could choose the address they are limited as.
-# Host bits must be zero; /0 is refused; at most 32 entries.
+# Host bits must be zero; networks wider than /8 (IPv4) or /32 (IPv6) are
+# refused; at most 32 entries.
 # Behind Caddy in Docker, list the subnet of the network the two containers
-# share (docker network inspect <network> shows it), for example:
+# share (docker network inspect <network> shows it). This trusts every
+# container on that network (another service there too), which is fine for
+# containers you run yourself. For example:
 #   trusted_proxies: [172.18.0.0/16]
 trusted_proxies: []
 

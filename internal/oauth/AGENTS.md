@@ -18,7 +18,7 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
 
 `GET /.well-known/oauth-protected-resource`, `GET /.well-known/oauth-protected-resource/mcp`,
 `GET /.well-known/oauth-authorization-server`, `GET /.well-known/openid-configuration`,
-`GET|POST /authorize`, `GET /authorize/callback`, `POST /oauth/token`, `POST /revoke`, `GET /keys`,
+`GET /authorize` (other methods get 405), `GET /authorize/callback`, `POST /oauth/token`, `POST /revoke`, `GET /keys`,
 `POST /register`, `GET /login`, `POST /login`, `POST /login/deny`, `POST /login/passkey/begin`,
 `POST /login/passkey/finish`, `GET /enroll`, `POST /enroll/begin`, `POST /enroll/finish`.
 `Service.Register` is the only place routes are added; a new route is a design change.
@@ -58,12 +58,19 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
 - **Pages** set a nonce-based CSP with `frame-ancestors 'none'`, use `html/template`, and have no
   inline event handlers.
   Page scripts send the CSRF token in the `X-CSRF-Token` header (`csrfHeader`), never in a URL.
-- **Rate limits are per source, then global.** `/login` (every factor, through `loginPages.admit`;
-  passkeys charge it at `/login/passkey/begin` and `/enroll/begin`) and
-  `/register` charge a per-source bucket (`ipLimiter`, LRU-bounded at `ipLimiterSize`, IPv6 per /64)
-  before the global one. The source is `trustedProxies.clientIP`: X-Forwarded-For is read only when the
-  TCP peer is in config `trusted_proxies`, right-most untrusted entry first. Never key a limit on a
-  header any other way.
+- **Rate limits are per source, then global** (`admitSource`, which gives the source's token back when
+  the global bucket refuses). Code attempts on `/login` and the TOTP check of `/enroll/begin`
+  (`loginPages.admit`, after the link is checked), `/register`, `/authorize`, and CIMD first fetches
+  (the source reaches the resolver through the request context, `withSource`) charge a per-source
+  bucket (`ipLimiter`, LRU-bounded at `ipLimiterSize`, IPv6 per /64) before the global one. Passkey
+  begin and finish charge only the per-source login bucket (`admitPasskey`): passkeys cannot be
+  guessed, and keeping them off the global bucket means TOTP guessing cannot block them;
+  `maxCeremonies` is sized from the `/authorize` budget and the pending cap instead
+  (`TestCeremonyCapExceedsTheLoginBudget`). The source is `trustedProxies.clientIP`: X-Forwarded-For is
+  read only when the TCP peer is in config `trusted_proxies`, right-most untrusted entry first. Never
+  key a limit on a header any other way.
+- **Logs name a CIMD client by host only** (`logClientID`): the rest of the URL is chosen by whoever
+  sends `/authorize`. Every log line with a client id goes through it.
 - **Time:** use `Store.now`, never `time.Now`, so tests can expire things. The library uses real time
   for `expires_in`, so test clocks start at the real time and only move forward.
 
@@ -89,6 +96,9 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
    same way and passes the id to `RevokeToken`.
 6. `AuthorizeCallback` requires `AuthRequest.Done()`; the code is `Crypto.Encrypt(authRequestID)`,
    handed to `SaveAuthCode`.
+7. The token endpoint answers an `*oidc.Error` of type `invalid_client` with 401 and any non-oidc error
+   with 500; `GetClientByClientID` returns a fresh `invalid_client` for a client that is gone
+   (`TestRefreshByRevokedClientIsInvalidClient`).
 
 The tests in this package and `internal/server/oauth_test.go` cover each one; run them on any bump.
 
