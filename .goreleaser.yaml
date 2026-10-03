@@ -88,12 +88,15 @@ dockers_v2:
       org.opencontainers.image.version: "{{ .Version }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"
       org.opencontainers.image.created: "{{ .CommitDate }}"
+    # buildx refuses index annotations when it exports a single-platform image
+    # ("--load", which snapshots use), so snapshots scope them to the manifest
+    # only. The keys are templates; the release gets the index scope too.
     annotations:
-      "index,manifest:org.opencontainers.image.description": MCP server that lets AI assistants read and write one Markdown vault
-      "index,manifest:org.opencontainers.image.source": https://github.com/JoseJimenez-M/cortex-mcp
-      "index,manifest:org.opencontainers.image.licenses": PolyForm-Noncommercial-1.0.0
-      "index:org.opencontainers.image.base.name": "{{ .BaseImage }}"
-      "index:org.opencontainers.image.base.digest": "{{ .BaseImageDigest }}"
+      "{{ if .IsSnapshot }}manifest{{ else }}index,manifest{{ end }}:org.opencontainers.image.description": MCP server that lets AI assistants read and write one Markdown vault
+      "{{ if .IsSnapshot }}manifest{{ else }}index,manifest{{ end }}:org.opencontainers.image.source": https://github.com/JoseJimenez-M/cortex-mcp
+      "{{ if .IsSnapshot }}manifest{{ else }}index,manifest{{ end }}:org.opencontainers.image.licenses": PolyForm-Noncommercial-1.0.0
+      "{{ if .IsSnapshot }}manifest{{ else }}index{{ end }}:org.opencontainers.image.base.name": "{{ .BaseImage }}"
+      "{{ if .IsSnapshot }}manifest{{ else }}index{{ end }}:org.opencontainers.image.base.digest": "{{ .BaseImageDigest }}"
     sbom: "true"
 
 # Keyless signature of each pushed image, by digest.
