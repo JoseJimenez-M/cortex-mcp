@@ -140,7 +140,8 @@ go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 ./...
 
 ## Licence
 
-Source-available under PolyForm Noncommercial 1.0.0. Commercial use (companies, paid services, resale, including modified versions) requires a separate licence: contact jimenez331375@gmail.com.
+Source-available under PolyForm Noncommercial 1.0.0. Commercial use (companies, paid services,
+resale, including modified versions) requires a separate licence: contact jimenez331375@gmail.com.
 
 The full terms are in [`LICENSE`](LICENSE). This is not an OSI open source licence: personal,
 research, hobby, and noncommercial organizational use is permitted, commercial use is not. The Go

@@ -20,6 +20,8 @@ reviewed for correctness and security before features. Thank you for reading thi
 > approved by the owner yet. Do not treat it as final: its wording, and whether it is required, may
 > change before the first release.
 
+Until the CLA is final, outside pull requests are not accepted.
+
 cortex-mcp is source-available under the PolyForm Noncommercial License 1.0.0, and the author also
 offers separate commercial licences. To keep both possible, every contribution is accepted under the
 agreement below. Read it before you open a pull request.

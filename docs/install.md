@@ -46,8 +46,15 @@ curl -fsSLO "${BASE}/checksums.txt"
 curl -fsSLO "${BASE}/checksums.txt.sigstore.json"
 ```
 
-[Verify the download](#verifying-a-download) before going on. Then install the binary, create a
-dedicated user, and give it a state folder and a config file:
+[Verify the download](#verifying-a-download) before going on.
+
+Run cortex-mcp as the user that owns the vault, the same user your editor or sync tool (Obsidian,
+Syncthing, a git checkout) runs as. Every note the server writes ends up owned by the server's user (a
+rewrite replaces the file), and new notes get mode 0644 filtered by its umask, so a different user
+leaves your editor or sync tool with notes it cannot change. The examples use `alice` as the vault
+owner; replace it with yours.
+
+Install the binary, and give the service a state folder and a config file:
 
 ```bash
 mkdir "cortex-mcp-${VERSION}"
@@ -55,15 +62,13 @@ tar -xzf "cortex-mcp_${VERSION}_linux_${ARCH}.tar.gz" -C "cortex-mcp-${VERSION}"
 sudo install -m 0755 "cortex-mcp-${VERSION}/cortex-mcp" /usr/local/bin/cortex-mcp
 cortex-mcp version
 
-sudo useradd --system --home-dir /var/lib/cortex-mcp --shell /usr/sbin/nologin cortex-mcp
-sudo install -d -m 0700 -o cortex-mcp -g cortex-mcp /var/lib/cortex-mcp
+sudo install -d -m 0700 -o alice -g alice /var/lib/cortex-mcp
 sudo install -d -m 0755 /etc/cortex-mcp
 sudo install -m 0644 "cortex-mcp-${VERSION}/config.example.yaml" /etc/cortex-mcp/config.yaml
 ```
 
 Edit `/etc/cortex-mcp/config.yaml` (at least `vault: /srv/vault`, `state_dir: /var/lib/cortex-mcp`,
-and `public_url`; see [configuration](configuration.md)), and give the `cortex-mcp` user write access
-to the vault (make it the owner, or add it to the vault's group).
+and `public_url`; see [configuration](configuration.md)).
 
 A systemd unit, `/etc/systemd/system/cortex-mcp.service`:
 
@@ -74,11 +79,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=cortex-mcp
-Group=cortex-mcp
+User=alice
+Group=alice
 ExecStart=/usr/local/bin/cortex-mcp serve
 Restart=on-failure
-# Notes are written 0644 filtered by the umask; 0077 keeps new notes private.
+# Notes are written 0644 filtered by the umask; 0077 keeps new notes private
+# to the vault owner.
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -105,8 +111,16 @@ sudo systemctl enable --now cortex-mcp
 curl -fsS http://127.0.0.1:8080/healthz        # prints: ok
 ```
 
-Run the owner commands as the service user, so the files they create belong to it:
-`sudo -u cortex-mcp cortex-mcp setup`.
+Run the owner commands as the same user, so the files they create belong to it:
+`sudo -u alice cortex-mcp setup`.
+
+**A dedicated service user instead.** A separate user (for example a system user `cortex-mcp`) that
+reaches the vault through the vault's group also works, with two limits. Set `UMask=0027` instead of
+`0077`, or the group cannot even read the notes the server creates. And the group gets read-only
+access to what the server writes: new notes and folders are 0640 and 0750, owned by the service user,
+and a note the server rewrites keeps its mode but becomes owned by the service user, so it is
+read-only for the group unless it was group-writable before. Your editor or sync tool, in the group,
+can read those notes but not change them in place.
 
 **macOS:** the binaries are not notarized. After verifying the archive, remove the quarantine flag with
 `xattr -d com.apple.quarantine cortex-mcp`.
@@ -131,6 +145,7 @@ services:
     restart: unless-stopped
     user: "1000:1000"          # the host owner of the vault and state folders
     read_only: true
+    tmpfs: [/tmp]              # writable scratch space for SQLite, see below
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     volumes:
@@ -155,11 +170,13 @@ trusted_proxies: [172.18.0.0/16]   # the subnet of the "proxy" network, see belo
 ```
 
 Create the state folder first, owned by the same uid, with `install -d -m 0700 -o 1000 -g 1000
-/srv/cortex-mcp/state`. No port is published: the proxy reaches `cortex-mcp:8080` over the shared
-network. `serve` logs a warning about the non-loopback `listen`, which is expected in a container.
-Run the owner commands inside the container, for example
-`docker compose exec cortex-mcp /cortex-mcp setup -config /config/config.yaml`; `reset-auth` there
-needs `-yes` or a TTY.
+/srv/cortex-mcp/state`. `read_only: true` makes `/tmp` read-only too, and SQLite puts the temporary
+files of large sorts and temporary indexes for `auth.db` there; the `tmpfs` mount gives it a
+writable `/tmp` in memory that nothing needs to keep across restarts. No port is published: the proxy
+reaches `cortex-mcp:8080` over the shared network. `serve` logs a warning about the non-loopback
+`listen`, which is expected in a container. Run the owner commands inside the container, for example
+`docker compose exec cortex-mcp /cortex-mcp setup -config /config/config.yaml`; `reset-auth` there needs
+`-yes` or a TTY.
 
 ## Verifying a download
 

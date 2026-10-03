@@ -89,9 +89,9 @@ for more, the values are: client secret empty (it is a public client using PKCE)
 - Register right before you connect. A client that never completes a sign-in is deleted after 24
   hours, and when 50 such clients exist the oldest one older than 10 minutes is evicted to make room
   (if none is old enough, `/register` answers 503 until one is). Once connected, the client is kept.
-- `cortex-mcp clients revoke ID` deletes the client, so a revoked Client ID can never be reused: the
-  same id is refused from then on. To reconnect Muse after a revoke, register a new client with the
-  command above and paste the new id into the connector.
+- `cortex-mcp clients revoke ID` deletes the client, and a Client ID from `/register` cannot be
+  reused: the same id is refused from then on. To reconnect Muse after a revoke, register a new client
+  with the command above and paste the new id into the connector.
 - `/register` needs `Content-Type: application/json` and is rate limited per source address (5, then 1
   every 6 minutes). The redirect URI must be on `oauth.redirect_allowlist`; the Muse callback is there
   by default.
@@ -133,8 +133,13 @@ connect.
 
 - `cortex-mcp clients list` shows Bearer tokens and OAuth clients, one per line, with each OAuth
   client's redirect hosts.
-- `cortex-mcp clients revoke ID` ends one connection: an OAuth client with all its tokens (the client
-  itself is deleted, so its id cannot be used again), or a Bearer token. Revoking one never affects the
-  others.
+- `cortex-mcp clients revoke ID` ends one connection: an OAuth client with all its tokens, or a Bearer
+  token. Revoking one never affects the others. The OAuth client itself is deleted, and what happens
+  next depends on how it registered:
+  - A client registered through `/register` (Meta Muse, for example) cannot use its id again: the id
+    is refused from then on. To reconnect, register again and give the app the new id.
+  - A client that uses a client ID metadata document (claude.ai, for example) is created again the
+    next time the app connects, since its id is the URL of that document. The connection still needs
+    your approval on the login page, like a first connection.
 - Each write is labelled in `state_dir/writes.log` with the client that made it: a Bearer token's name,
   or the name an OAuth app registered.
