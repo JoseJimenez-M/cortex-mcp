@@ -5,6 +5,7 @@
 package authdb
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"fmt"
@@ -99,9 +100,15 @@ const bearerTable = `CREATE TABLE IF NOT EXISTS bearer_tokens (
 )`
 
 // oauthSchema is the version 2 to 3 migration. Times are Unix seconds.
-// Secrets are stored only as SHA-256 hashes (tokens, codes, recovery codes,
-// enrollment links), except the two that must be usable: the TOTP secret and
-// the signing and encryption keys, which never leave state_dir.
+// Long-lived secrets (refresh tokens, authorization codes, recovery codes,
+// enrollment links) are stored only as SHA-256 hashes. Exceptions: the TOTP
+// secret and the signing and encryption keys, which must be usable and never
+// leave state_dir, and the short-lived auth_requests.id and csrf, which are
+// stored plain.
+//
+// There are deliberately no foreign keys. A revocation must delete across
+// auth_codes, access_tokens and refresh_tokens by family in one transaction;
+// Task 8 has a test asserting no rows survive a family revocation.
 var oauthSchema = []string{
 	// The single owner (spec 6.1). webauthn_id is the passkey user handle.
 	`CREATE TABLE owner (
@@ -182,6 +189,14 @@ var oauthSchema = []string{
 		rotated INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX refresh_tokens_family ON refresh_tokens(family)`,
+	// Expiry indexes serve the periodic sweeps; auth_codes(family) serves
+	// family revocation.
+	`CREATE INDEX auth_codes_family ON auth_codes(family)`,
+	`CREATE INDEX auth_codes_expires ON auth_codes(expires)`,
+	`CREATE INDEX access_tokens_expires ON access_tokens(expires)`,
+	`CREATE INDEX refresh_tokens_expires ON refresh_tokens(expires)`,
+	`CREATE INDEX enrollments_expires ON enrollments(expires)`,
+	`CREATE INDEX auth_requests_created ON auth_requests(created)`,
 	`CREATE TABLE oauth_keys (
 		name     TEXT PRIMARY KEY CHECK (name IN ('signing', 'crypto')),
 		kid      TEXT NOT NULL,
@@ -189,9 +204,17 @@ var oauthSchema = []string{
 	)`,
 }
 
-func migrate(db *sql.DB) error {
+func userVersion(q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (int, error) {
 	var v int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+	err := q.QueryRowContext(context.Background(), `PRAGMA user_version`).Scan(&v)
+	return v, err
+}
+
+func migrate(db *sql.DB) error {
+	v, err := userVersion(db)
+	if err != nil {
 		return err
 	}
 	if v > SchemaVersion {
@@ -200,33 +223,62 @@ func migrate(db *sql.DB) error {
 	if v == SchemaVersion {
 		return nil
 	}
-	// One transaction, so a failure leaves the database at its old version
-	// (user_version lives in the database header and is transactional).
-	tx, err := db.Begin()
+	// Two processes (serve and a token command) can both see an old version
+	// here. BEGIN IMMEDIATE takes the write lock up front, so the second one
+	// waits (busy_timeout) instead of failing with SQLITE_BUSY on a lock
+	// upgrade, and then re-reads the version inside the lock: the first
+	// process has usually finished by then. database/sql's Begin issues a
+	// deferred BEGIN, so the transaction is driven by hand on a dedicated
+	// connection. user_version lives in the database header and is
+	// transactional, so a failure leaves the database at its old version.
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }() // no-op after Commit
-	if _, err := tx.Exec(bearerTable); err != nil {
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+	if v, err = userVersion(conn); err != nil {
+		return err
+	}
+	if v > SchemaVersion {
+		return fmt.Errorf("auth database has schema version %d, this build supports up to %d", v, SchemaVersion)
+	}
+	if v == SchemaVersion {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, bearerTable); err != nil {
 		return err
 	}
 	if v < 2 {
-		if err := addIDColumn(tx); err != nil {
+		if err := addIDColumn(ctx, conn); err != nil {
 			return err
 		}
 	}
 	if v < 3 {
 		for _, stmt := range oauthSchema {
-			if _, err := tx.Exec(stmt); err != nil {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
 				return err
 			}
 		}
 	}
 	// PRAGMA does not accept bound parameters; the value is a constant.
-	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion)); err != nil {
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // addIDColumn is the version 1 to 2 migration. Name is the primary key, but a
@@ -235,11 +287,11 @@ func migrate(db *sql.DB) error {
 // random id per row does. ALTER TABLE cannot add a NOT NULL column without a
 // default, so the column is nullable; every row is filled here and Create
 // always sets it.
-func addIDColumn(tx *sql.Tx) error {
-	if _, err := tx.Exec(`ALTER TABLE bearer_tokens ADD COLUMN id TEXT`); err != nil {
+func addIDColumn(ctx context.Context, tx *sql.Conn) error {
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE bearer_tokens ADD COLUMN id TEXT`); err != nil {
 		return err
 	}
-	rows, err := tx.Query(`SELECT name FROM bearer_tokens WHERE id IS NULL`)
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM bearer_tokens WHERE id IS NULL`)
 	if err != nil {
 		return err
 	}
@@ -259,10 +311,10 @@ func addIDColumn(tx *sql.Tx) error {
 		return err
 	}
 	for _, n := range names {
-		if _, err := tx.Exec(`UPDATE bearer_tokens SET id = ? WHERE name = ?`, rand.Text(), n); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE bearer_tokens SET id = ? WHERE name = ?`, rand.Text(), n); err != nil {
 			return err
 		}
 	}
-	_, err = tx.Exec(`CREATE UNIQUE INDEX bearer_tokens_id ON bearer_tokens(id)`)
+	_, err = tx.ExecContext(ctx, `CREATE UNIQUE INDEX bearer_tokens_id ON bearer_tokens(id)`)
 	return err
 }
