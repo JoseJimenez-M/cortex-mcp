@@ -11,8 +11,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -20,6 +23,8 @@ jobs:
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: go mod tidy
         run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: third-party notices are current
+        run: go run ./tools/thirdpartynotices > THIRD_PARTY_NOTICES && git diff --exit-code THIRD_PARTY_NOTICES
       - name: vet
         run: go vet ./...
       - name: test
@@ -42,3 +47,70 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0 && govulncheck ./...
       - name: gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0 && gosec ./...
+
+  # Exercises the release path before any tag exists: the workflows lint
+  # clean, the GoReleaser config is valid, and a full snapshot (every binary,
+  # archive, SBOM, and both images) builds. Nothing is signed or pushed.
+  release-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # GoReleaser derives the version from tags and history
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit v0.33.1 (buildx-stable-1 on 2026-10-03), pinned by its
+          # index digest so a moved tag cannot change the builder. Bumped by
+          # hand in ci.yml and release.yml (docs/releasing.md, "Maintenance").
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.54.0
+      # Installed as in release.yml, so the snapshot runs with the same tools
+      # on PATH as a release; signing itself is skipped.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.18.2
+          install-only: true
+      - name: goreleaser check
+        run: goreleaser check
+      - name: pinned SBOM scanner resolves
+        # Snapshots skip the SBOM attestation, so check here that the scanner
+        # reference in .goreleaser.yaml names an image that exists.
+        run: |
+          ref=$(grep -o 'generator=[^{}" ]*' .goreleaser.yaml | cut -d= -f2)
+          test -n "$ref"
+          docker buildx imagetools inspect "$ref"
+      - name: goreleaser snapshot
+        run: goreleaser release --snapshot --clean --skip=publish,sign
+      - name: snapshot contents
+        run: |
+          test "$(find dist -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 5
+          test "$(find dist -maxdepth 1 -name '*.sbom.json' | wc -l)" -eq 5
+          test "$(grep -c '' dist/checksums.txt)" -eq 10
+          for a in dist/*.tar.gz; do tar -xzOf "$a" THIRD_PARTY_NOTICES | cmp - THIRD_PARTY_NOTICES; done
+          for a in dist/*.zip; do unzip -p "$a" THIRD_PARTY_NOTICES | cmp - THIRD_PARTY_NOTICES; done
+      - name: snapshot binary reports its version
+        run: |
+          bin=$(find dist -type f -name cortex-mcp -path '*linux_amd64*')
+          out=$("$bin" version)
+          echo "$out"
+          case "$out" in "cortex-mcp v"*-SNAPSHOT-*) ;; *) echo "version not set by the linker"; exit 1 ;; esac
+      - name: snapshot image runs and carries the licence and notices
+        run: |
+          img=$(docker image ls --format '{{.Repository}}:{{.Tag}}' ghcr.io/josejimenez-m/cortex-mcp | grep -- '-amd64$' | head -n 1)
+          test -n "$img"
+          docker run --rm "$img" version | grep -q '^cortex-mcp v'
+          test "$(docker image inspect "$img" --format '{{.Config.User}}')" = 65532
+          cid=$(docker create "$img")
+          docker cp "$cid:/LICENSE" - | tar -xO | head -n 1 | grep -q '^# PolyForm Noncommercial License 1.0.0$'
+          docker cp "$cid:/THIRD_PARTY_NOTICES" - | tar -xO | cmp - THIRD_PARTY_NOTICES
+          docker rm "$cid"

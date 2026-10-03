@@ -1,0 +1,132 @@
+# GoReleaser configuration (schema version 2, GoReleaser v2.18.2).
+# .github/workflows/release.yml runs "goreleaser release --clean" on v* tags;
+# ci.yml runs "goreleaser check" and a snapshot on every pull request.
+# docs/releasing.md explains what a release contains and how to verify it.
+version: 2
+
+project_name: cortex-mcp
+
+builds:
+  - id: cortex-mcp
+    main: ./cmd/cortex-mcp
+    binary: cortex-mcp
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      # Not a release target (spec section 10); nothing tests it.
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/JoseJimenez-M/cortex-mcp/internal/server.Version=v{{ .Version }}
+    # File times come from the commit, so rebuilding a tag gives the same bytes.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: cortex-mcp
+    ids: [cortex-mcp]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - THIRD_PARTY_NOTICES
+      - README.md
+      - config.example.yaml
+      - docs/*.md
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# One SPDX SBOM per archive, from the binaries' embedded module list only
+# (no --enrich: no network lookups, the same input gives the same document).
+sboms:
+  - id: archives
+    artifacts: archive
+    args: ["$artifact", "--output", "spdx-json=$document"]
+
+# Keyless signature of the checksum file, which lists every archive and SBOM.
+# The certificate names this repository, release.yml, and the tag.
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--bundle=${signature}", "${artifact}", "--yes"]
+    output: true
+
+# Multi-arch image from the binaries above, built and pushed in one buildx
+# run during publish. Snapshots build one image per platform instead and load
+# them locally ("<tag>-amd64", "<tag>-arm64"). The pushed index carries an
+# SBOM attestation (see flags) and the provenance attestation buildx adds by
+# default when it pushes.
+dockers_v2:
+  - id: image
+    ids: [cortex-mcp]
+    dockerfile: Dockerfile
+    images:
+      - ghcr.io/josejimenez-m/cortex-mcp
+    tags:
+      - "{{ .Tag }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    extra_files:
+      - LICENSE
+      - THIRD_PARTY_NOTICES
+    labels:
+      org.opencontainers.image.title: cortex-mcp
+      org.opencontainers.image.description: MCP server that lets AI assistants read and write one Markdown vault
+      org.opencontainers.image.source: https://github.com/JoseJimenez-M/cortex-mcp
+      org.opencontainers.image.licenses: PolyForm-Noncommercial-1.0.0
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+    # buildx refuses index annotations when it exports a single-platform image
+    # ("--load", which snapshots use), so snapshots scope them to the manifest
+    # only. The keys are templates; the release gets the index scope too.
+    annotations:
+      "{{ if .IsSnapshot }}manifest{{ else }}index,manifest{{ end }}:org.opencontainers.image.description": MCP server that lets AI assistants read and write one Markdown vault
+      "{{ if .IsSnapshot }}manifest{{ else }}index,manifest{{ end }}:org.opencontainers.image.source": https://github.com/JoseJimenez-M/cortex-mcp
+      "{{ if .IsSnapshot }}manifest{{ else }}index,manifest{{ end }}:org.opencontainers.image.licenses": PolyForm-Noncommercial-1.0.0
+      "{{ if .IsSnapshot }}manifest{{ else }}index{{ end }}:org.opencontainers.image.base.name": "{{ .BaseImage }}"
+      "{{ if .IsSnapshot }}manifest{{ else }}index{{ end }}:org.opencontainers.image.base.digest": "{{ .BaseImageDigest }}"
+    # The SBOM attestation comes from a pinned scanner,
+    # docker/buildkit-syft-scanner 1.12.0 (stable-1 on 2026-10-03) by index
+    # digest, instead of BuildKit's floating default. GoReleaser's own `sbom`
+    # option would add a second, unpinned --attest=type=sbom, so it is off.
+    # Like that option, the flag applies only when publishing: snapshots
+    # --load single-platform images into the local daemon, which may not
+    # accept attestations. ci.yml checks that the reference resolves.
+    flags:
+      - "{{ if not .IsSnapshot }}--attest=type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9{{ end }}"
+    sbom: "false"
+
+# Keyless signature of each pushed image, by digest.
+docker_signs:
+  - id: image
+    cmd: cosign
+    args: ["sign", "${artifact}@${digest}", "--yes"]
+    output: true
+
+release:
+  prerelease: auto
+  footer: |
+    Verify before installing: see docs/install.md, "Verifying a download". checksums.txt is signed
+    keylessly by this repository's release workflow (checksums.txt.sigstore.json), and the image
+    ghcr.io/josejimenez-m/cortex-mcp is signed by digest.
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "

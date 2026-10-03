@@ -13,9 +13,11 @@ vault or any folder of `.md` files) over the Model Context Protocol (MCP). The v
 "brain"; the AI behind it is replaceable.*
 
 Status: design approved. Plan 1 (core server: vault, tools, Bearer auth, rate limit, write log, `serve`
-and `token` commands) and plan 2 (OAuth 2.1, `setup`, `unlock-totp`, `reset-auth`, `clients`) are
-implemented. The release tooling and docs of section 10 are planned (plan 3). Decisions taken while
-building plan 2 are recorded in 6.6.
+and `token` commands), plan 2 (OAuth 2.1, `setup`, `unlock-totp`, `reset-auth`, `clients`), and plan 3
+(the licence file, release tooling, and user docs of sections 10 and 13) are implemented, except the two
+owner gates: making the repository public and pushing the first version tag. No release has been
+published yet. Decisions taken while building plan 2 are recorded in 6.6, and those of plan 3 in 10 and
+13.
 
 ![Architecture](../diagrams/cortex-mcp-architecture.svg)
 
@@ -411,17 +413,42 @@ refactor. No production code without a test that required it.
   full flow, including OAuth with a scripted client.
 - **Concurrency**: tests run with `-race`.
 
-**CI on every pull request:** `go test -race ./...`, `go vet`, `staticcheck`, `govulncheck`, `gosec`,
-and a coverage report. A failing gate blocks merge.
+**CI on every pull request:** `gofmt`, `go mod tidy`, `THIRD_PARTY_NOTICES` regenerated without a diff,
+`go test -race ./...` with a coverage report, each fuzz target for 20 s, `go vet`, `staticcheck`,
+`govulncheck`, `gosec`, and, for the release path, `actionlint`, `goreleaser check`, and a full
+GoReleaser snapshot (every binary, archive, and SBOM, and both images); the snapshot's amd64 binary must
+report the snapshot version, its image must run and carry the licence, and every archive and the image
+must carry the committed `THIRD_PARTY_NOTICES`. A failing gate blocks merge.
 
-**Releases:** GoReleaser via GitHub Actions: binaries for linux/arm64, linux/amd64, darwin, windows;
-multi-arch container image on GHCR from a distroless base; cosign signatures and an SBOM per release.
+**Releases** (built with plan 3): GoReleaser v2 (`.goreleaser.yaml`) runs from
+`.github/workflows/release.yml` on `v*` tags. It builds linux/amd64, linux/arm64, darwin/amd64,
+darwin/arm64, and windows/amd64 binaries (`CGO_ENABLED=0`, `-trimpath`, `server.Version` set by the
+linker), archives them (tar.gz, zip for Windows) with `LICENSE`, `THIRD_PARTY_NOTICES`, `README.md`,
+`config.example.yaml`, and `docs/*.md`, writes `checksums.txt` and an SPDX SBOM per archive (syft),
+signs `checksums.txt` keylessly with cosign (a `.sigstore.json` bundle; GitHub OIDC identity of
+`release.yml` at the tag), and pushes a multi-arch image (linux/amd64, linux/arm64) to
+`ghcr.io/josejimenez-m/cortex-mcp` with `dockers_v2`, built from the same binaries on
+`gcr.io/distroless/static-debian13:nonroot` pinned by digest, with an SBOM attestation from
+`docker/buildkit-syft-scanner` pinned by digest (BuildKit itself is pinned by digest too), signed
+keylessly by digest. Decisions made with plan 3: the base moved from debian12 to debian13 (distroless no
+longer lists debian12 as updated); the release job runs only while the repository is public and only for
+tags on `main`, with `contents`, `packages`, and `id-token` write and nothing else, after the tests pass
+in a separate job with read-only `contents`; every action is pinned by commit SHA and the base image by
+digest (Dependabot bumps both); GoReleaser and syft are pinned by version, BuildKit and the SBOM scanner
+by version and digest; no QEMU (the image build runs no commands), no windows/arm64 binary; the
+provenance attestation buildx attaches by default when it pushes (SLSA provenance in its minimal mode,
+in the image index next to the SBOM) is kept, and no other provenance is generated; `latest` moves only
+for non-prerelease tags. Making the repository public and pushing the first tag are owner decisions,
+never automated.
 
-**Docs (English), shipped with the code:** `README.md` (what, quick start, licence), `docs/install.md`
-(requirements, binary or Docker, reverse proxy examples for Caddy and nginx, `setup`),
-`docs/configuration.md`, `docs/connecting-clients.md` (examples for a CLI agent with a Bearer token and
-for OAuth-capable apps), `docs/security.md` (threat model and deliberate non-features). Docs never
-contain any operator's real domain, IP, or paths.
+**Docs (English), shipped with the code and in every release archive:** `README.md` (what, status,
+security in brief, install pointers, commands, licence), `docs/install.md` (requirements, binary or
+image, verifying signatures, systemd, Docker Compose, Caddy and nginx with `trusted_proxies`, `setup`,
+commands), `docs/configuration.md` (every key, default, and limit), `docs/connecting-clients.md`
+(Claude Code with OAuth or a Bearer token, claude.ai, ChatGPT, Meta Muse with a Client ID registered
+through `/register`, generic MCP clients), `docs/security.md` (threat model, defences, deliberate
+non-features, residual limits), `docs/releasing.md` (cutting and verifying a release, upgrading),
+`CONTRIBUTING.md`, and `SECURITY.md`. Docs never contain any operator's real domain, IP, or paths.
 
 ## 11. Fallback: REST + OpenAPI (only if needed)
 
@@ -446,3 +473,12 @@ including modified versions) requires a separate licence negotiated with the aut
 BY-NC because Creative Commons advises against its licences for software. This makes the project
 source-available rather than OSI open source; the README states that plainly. If outside contributions
 are accepted while commercial licences are sold, contributors sign a CLA.
+
+Implemented with plan 3: `LICENSE` is the PolyForm Noncommercial 1.0.0 text, byte for byte from the
+PolyForm project's repository (its sha256 is in `docs/releasing.md`), followed by
+`Required Notice: Copyright 2026 Jose Jimenez (https://github.com/JoseJimenez-M)`; release archives and
+the image include it. The README states: "Source-available under PolyForm Noncommercial 1.0.0.
+Commercial use (companies, paid services, resale, including modified versions) requires a separate
+licence: contact jimenez331375@gmail.com." `CONTRIBUTING.md` holds the CLA (version 1): contributors
+grant the author a copyright licence that allows relicensing, commercial licences included, and a
+patent licence, keep their copyright, and agree by a fixed line in the pull request description.
