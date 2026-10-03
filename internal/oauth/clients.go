@@ -48,6 +48,54 @@ func (s *Store) saveCIMD(c clientRow) error {
 	return err
 }
 
+// authRequestTTL is how long an authorization request (and so a login in
+// progress for a client) stays valid. A client younger than this may still
+// be mid-login, so registration never evicts it.
+const authRequestTTL = 10 * time.Minute
+
+// errRegistryFull means the never-used client table is full and nothing in
+// it is old enough to evict.
+var errRegistryFull = errors.New("client registry full")
+
+// registerDCR inserts a DCR client atomically with the capacity check. Only
+// never-used clients (no grant) count against maxUnused. When full, the
+// oldest never-used client created at least minAge ago is evicted to make
+// room; if there is none, errRegistryFull. Clients with grants are never
+// counted or evicted.
+func (s *Store) registerDCR(c clientRow, maxUnused int, minAge time.Duration) error {
+	uris, err := json.Marshal(c.RedirectURIs)
+	if err != nil {
+		return err
+	}
+	return s.tx(func(tx *sql.Tx) error {
+		const unused = `kind = 'dcr' AND NOT EXISTS (SELECT 1 FROM grants g WHERE g.client_id = oauth_clients.id)`
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM oauth_clients WHERE ` + unused).Scan(&n); err != nil {
+			return err
+		}
+		if n >= maxUnused {
+			var victim string
+			err := tx.QueryRow(`SELECT id FROM oauth_clients WHERE `+unused+` AND created <= ? ORDER BY created, id LIMIT 1`,
+				s.now().Add(-minAge).Unix()).Scan(&victim)
+			if errors.Is(err, sql.ErrNoRows) {
+				return errRegistryFull
+			}
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM auth_requests WHERE client_id = ?`, victim); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM oauth_clients WHERE id = ?`, victim); err != nil {
+				return err
+			}
+		}
+		_, err = tx.Exec(`INSERT INTO oauth_clients(id, kind, name, redirect_uris, created, fetched) VALUES(?, ?, ?, ?, ?, 0)`,
+			c.ID, c.Kind, c.Name, string(uris), c.Created.Unix())
+		return err
+	})
+}
+
 func (s *Store) clientByID(id string) (clientRow, error) {
 	if id == "" || len(id) > maxRedirectURIBytes {
 		return clientRow{}, ErrNotFound

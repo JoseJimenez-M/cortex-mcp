@@ -3,9 +3,12 @@ package oauth
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
+	"math"
 	"mime"
 	"net/http"
+	"strconv"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -13,9 +16,11 @@ import (
 
 const (
 	maxRegistrationBytes = 16 << 10
-	// maxDCRClients bounds the table: registration is unauthenticated, and
-	// claude.ai registers a new client for every connection.
-	maxDCRClients = 500
+	// maxUnusedDCR bounds the clients that never completed a login (no
+	// grant). Registration is unauthenticated and claude.ai registers a new
+	// client per connection, so this is the squatting surface; clients with
+	// a grant are the owner's real connections and never count.
+	maxUnusedDCR = 50
 )
 
 // registration is the part of an RFC 7591 request this server uses. Every
@@ -61,18 +66,17 @@ type registrar struct {
 	limit *rate.Limiter
 }
 
-// newRegistrar allows 20 registrations an hour with a burst of 5: enough
-// for a few assistants reconnecting, too few to fill the table quickly.
+// newRegistrar allows 60 valid registrations an hour with a burst of 10.
+// The ceiling is global, not per client address (behind a proxy the address
+// is not trustworthy), so it is generous for the owner's few assistants
+// reconnecting while still bounding how fast an attacker can churn the
+// table. Only requests that pass validation are charged (see ServeHTTP), so
+// junk cannot starve real registrations.
 func newRegistrar(store *Store, allow allowlist) *registrar {
-	return &registrar{store: store, allow: allow, limit: rate.NewLimiter(rate.Every(3*time.Minute), 5)}
+	return &registrar{store: store, allow: allow, limit: rate.NewLimiter(rate.Every(time.Minute), 10)}
 }
 
 func (g *registrar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !g.limit.Allow() {
-		w.Header().Set("Retry-After", "180")
-		oauthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many registrations, try again later")
-		return
-	}
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		oauthError(w, http.StatusBadRequest, "invalid_client_metadata", "Content-Type must be application/json")
 		return
@@ -87,18 +91,22 @@ func (g *registrar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, rerr.code, rerr.desc)
 		return
 	}
-	n, err := g.store.countClients(kindDCR)
-	if err != nil {
-		oauthError(w, http.StatusInternalServerError, "server_error", "registration is unavailable")
-		return
-	}
-	if n >= maxDCRClients {
-		oauthError(w, http.StatusBadRequest, "invalid_client_metadata", "too many registered clients; the owner can remove unused ones with cortex-mcp clients revoke")
+	// Charge the limiter only now: invalid requests are rejected for free.
+	res := g.limit.Reserve()
+	if d := res.Delay(); !res.OK() || d > 0 {
+		res.Cancel()
+		secs := max(1, int(math.Ceil(d.Seconds())))
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		oauthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many registrations, try again later")
 		return
 	}
 	now := g.store.now()
 	row := clientRow{ID: rand.Text(), Kind: kindDCR, Name: reg.ClientName, RedirectURIs: reg.RedirectURIs, Created: now}
-	if err := g.store.insertClient(row); err != nil {
+	switch err := g.store.registerDCR(row, maxUnusedDCR, authRequestTTL); {
+	case errors.Is(err, errRegistryFull):
+		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "registration is temporarily unavailable, try again later")
+		return
+	case err != nil:
 		oauthError(w, http.StatusInternalServerError, "server_error", "registration is unavailable")
 		return
 	}

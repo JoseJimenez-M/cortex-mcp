@@ -1,13 +1,19 @@
 package oauth
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func postRegister(t *testing.T, h http.Handler, contentType, body string) (*httptest.ResponseRecorder, map[string]any) {
@@ -83,27 +89,120 @@ func TestRegisterIsRateLimited(t *testing.T) {
 	s, _ := newTestStore(t)
 	h := newRegistrar(s, defaultAllowlist(t))
 	body := `{"redirect_uris":["http://127.0.0.1/callback"]}`
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		if rec, _ := postRegister(t, h, "application/json", body); rec.Code != http.StatusCreated {
 			t.Fatalf("request %d: %d", i, rec.Code)
 		}
 	}
 	rec, out := postRegister(t, h, "application/json", body)
-	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" || out["error"] == nil {
-		t.Fatalf("6th request: %d %v", rec.Code, out)
+	ra, err := strconv.Atoi(rec.Header().Get("Retry-After"))
+	if rec.Code != http.StatusTooManyRequests || err != nil || ra < 1 || ra > 60 || out["error"] == nil {
+		t.Fatalf("11th request: %d %q %v", rec.Code, rec.Header().Get("Retry-After"), out)
 	}
 }
 
-func TestRegisterIsCapped(t *testing.T) {
-	s, clk := newTestStore(t)
-	for i := 0; i < maxDCRClients; i++ {
-		if err := s.insertClient(clientRow{ID: fmt.Sprintf("C%04d", i), Kind: kindDCR, Name: "n", RedirectURIs: []string{"http://127.0.0.1/cb"}, Created: clk.Now()}); err != nil {
+func TestJunkDoesNotConsumeTheLimiter(t *testing.T) {
+	s, _ := newTestStore(t)
+	h := newRegistrar(s, defaultAllowlist(t))
+	for i := 0; i < 100; i++ {
+		body := `{"redirect_uris":["https://evil.example/cb"]}`
+		if i%2 == 0 {
+			body = `not json`
+		}
+		if rec, _ := postRegister(t, h, "application/json", body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("junk %d: %d", i, rec.Code)
+		}
+	}
+	if rec, _ := postRegister(t, h, "application/json", `{"redirect_uris":["http://127.0.0.1/callback"]}`); rec.Code != http.StatusCreated {
+		t.Fatalf("valid registration after junk: %d", rec.Code)
+	}
+}
+
+func seedUnused(t *testing.T, s *Store, n int, created time.Time) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if err := s.insertClient(clientRow{ID: fmt.Sprintf("U%04d", i), Kind: kindDCR, Name: "n", RedirectURIs: []string{"http://127.0.0.1/cb"}, Created: created.Add(time.Duration(i) * time.Second)}); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
+
+func TestFullTableEvictsOldestEligibleUnusedClient(t *testing.T) {
+	s, clk := newTestStore(t)
+	seedUnused(t, s, maxUnusedDCR, clk.Now())
+	clk.Advance(authRequestTTL + time.Hour)
+	rec, _ := postRegister(t, newRegistrar(s, defaultAllowlist(t)), "application/json", `{"redirect_uris":["http://127.0.0.1/callback"]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("51st: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := s.clientByID("U0000"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("oldest was not evicted: %v", err)
+	}
+	if _, err := s.clientByID("U0001"); err != nil {
+		t.Fatalf("second oldest evicted: %v", err)
+	}
+	if n, _ := s.countClients(kindDCR); n != maxUnusedDCR {
+		t.Fatalf("%d clients", n)
+	}
+}
+
+func TestClientsWithGrantsAreNeverEvictedOrCounted(t *testing.T) {
+	s, clk := newTestStore(t)
+	seedUnused(t, s, maxUnusedDCR, clk.Now())
+	for i := 0; i < maxUnusedDCR; i++ {
+		insertGrant(t, s, fmt.Sprintf("F%d", i), fmt.Sprintf("U%04d", i))
+	}
+	clk.Advance(authRequestTTL + time.Hour)
+	// All 50 have grants, so none counts and registration just inserts.
+	for i := 0; i < 3; i++ {
+		if rec, _ := postRegister(t, newRegistrar(s, defaultAllowlist(t)), "application/json", `{"redirect_uris":["http://127.0.0.1/callback"]}`); rec.Code != http.StatusCreated {
+			t.Fatalf("registration %d: %d", i, rec.Code)
+		}
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM oauth_clients WHERE id LIKE 'U%'`); n != maxUnusedDCR {
+		t.Fatalf("a client with a grant was evicted: %d left", n)
+	}
+}
+
+func TestYoungClientsAreNotEvicted(t *testing.T) {
+	s, clk := newTestStore(t)
+	seedUnused(t, s, maxUnusedDCR, clk.Now())
+	clk.Advance(authRequestTTL / 2)
 	rec, out := postRegister(t, newRegistrar(s, defaultAllowlist(t)), "application/json", `{"redirect_uris":["http://127.0.0.1/callback"]}`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(out["error_description"].(string), "clients revoke") {
+	if rec.Code != http.StatusServiceUnavailable || out["error"] != "temporarily_unavailable" || strings.Contains(rec.Body.String(), "cortex-mcp") {
 		t.Fatalf("%d %v", rec.Code, out)
+	}
+	if n, _ := s.countClients(kindDCR); n != maxUnusedDCR {
+		t.Fatalf("%d clients", n)
+	}
+}
+
+func TestConcurrentRegistrationsRespectTheCap(t *testing.T) {
+	s, clk := newTestStore(t)
+	seedUnused(t, s, maxUnusedDCR-5, clk.Now())
+	var wg sync.WaitGroup
+	var ok, full atomic.Int32
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := s.registerDCR(clientRow{ID: rand.Text(), Kind: kindDCR, Name: "n", RedirectURIs: []string{"http://127.0.0.1/cb"}, Created: clk.Now()}, maxUnusedDCR, authRequestTTL)
+			switch {
+			case err == nil:
+				ok.Add(1)
+			case errors.Is(err, errRegistryFull):
+				full.Add(1)
+			default:
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if ok.Load() != 5 || full.Load() != 15 {
+		t.Fatalf("ok=%d full=%d", ok.Load(), full.Load())
+	}
+	if n, _ := s.countClients(kindDCR); n != maxUnusedDCR {
+		t.Fatalf("%d clients", n)
 	}
 }
 
