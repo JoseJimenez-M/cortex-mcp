@@ -423,7 +423,9 @@ func CheckRedirectEntry(e string) string {
 
 // hostLabelRE is one DNS label of a lowercase host name. Entries are compared
 // as raw strings against what a client sends, so the syntax allows exactly one
-// spelling of a host: lowercase, no trailing dot, no IP literal.
+// spelling of a host: lowercase, no trailing dot, and no IP address in any
+// spelling (the last label may not be all digits or start with "0x"), nor
+// "localhost" (loopback is its own entry).
 var hostLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // checkRedirectHost validates the host[:port] of a redirect allowlist entry.
@@ -433,17 +435,25 @@ func checkRedirectHost(hostport string) string {
 		host = hostport[:i]
 		port := hostport[i+1:]
 		n, err := strconv.Atoi(port)
-		if port == "" || len(port) > 5 || err != nil || n < 1 || n > 65535 || strings.Trim(port, "0123456789") != "" {
-			return "port must be 1-65535 digits"
+		if port == "" || port[0] == '0' || len(port) > 5 || err != nil || n < 1 || n > 65535 || strings.Trim(port, "0123456789") != "" {
+			return "port must be 1-65535 digits without leading zeros"
 		}
 	}
 	if host == "" {
 		return "must include a host"
 	}
-	for _, label := range strings.Split(host, ".") {
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
 		if !hostLabelRE.MatchString(label) {
 			return "host must be lowercase letters, digits, hyphens and dots, with no trailing dot"
 		}
+	}
+	last := labels[len(labels)-1]
+	if strings.Trim(last, "0123456789") == "" || strings.HasPrefix(last, "0x") {
+		return "host must be a domain name, not an IP address"
+	}
+	if host == "localhost" {
+		return `use "loopback" instead of localhost`
 	}
 	return ""
 }

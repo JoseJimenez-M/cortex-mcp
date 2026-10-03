@@ -9,12 +9,17 @@ import (
 
 func TestCleanName(t *testing.T) {
 	for in, want := range map[string]string{
-		"Claude":                 "Claude",
-		"  Chat\tGPT \n":         "Chat GPT",
-		"evil\u202egnp.exe":      "evilgnp.exe",
-		"zero\u200bwidth":        "zerowidth",
-		"bad\xffbyte":            "badbyte",
-		"":                       "unnamed client",
+		"Claude":                   "Claude",
+		"  Chat\tGPT \n":           "Chat GPT",
+		"evil\u202egnp.exe":        "evilgnp.exe",
+		"zero\u200bwidth":          "zerowidth",
+		"bad\xffbyte":              "badbyte",
+		"":                         "unnamed client",
+		"\u3164":                   "unnamed client",
+		"\u115f\u1160\u2800\uffa0": "unnamed client",
+		"a\ue000b\u0378c":          "abc",
+		"e\u0301\u0488x":           "ex",
+		"Z" + strings.Repeat("\u0300\u0315\u0489", 40) + "algo": "Zalgo",
 		"\x00\x01":               "unnamed client",
 		strings.Repeat("a", 100): strings.Repeat("a", 64),
 	} {
@@ -33,7 +38,7 @@ func FuzzCleanName(f *testing.F) {
 			t.Fatalf("cleanName(%q) = %q", s, got)
 		}
 		for _, r := range got {
-			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || (unicode.IsSpace(r) && r != ' ') {
+			if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Mn, unicode.Me, unicode.Co, unicode.Cn) || (unicode.IsSpace(r) && r != ' ') {
 				t.Fatalf("cleanName(%q) kept %U", s, r)
 			}
 		}

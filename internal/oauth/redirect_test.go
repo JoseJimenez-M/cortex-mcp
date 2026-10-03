@@ -60,6 +60,8 @@ func TestAllowlistMatching(t *testing.T) {
 		"http://localhost:99999/cb",
 		"http://localhost/cb#x",
 		"http://LOCALHOST/cb",
+		"HTTP://localhost/cb",
+		"hTtP://127.0.0.1/cb",
 		"http://localhost./cb",
 		"http://localhost/%2e%2e/cb",
 		"http://localhost/a/../cb",

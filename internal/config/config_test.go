@@ -302,6 +302,8 @@ func TestCheckRedirectEntry(t *testing.T) {
 		"https://Example.com/cb", "https://example.com./cb", "https://example.com/%2e%2e/cb",
 		"https://example.com/a%2fb", "https://exa,mple.com/cb", "https://.example.com/cb",
 		"https://a..b/cb", "https://-a.com/cb", "https://[::1]/cb", "https://exa_mple.com/cb",
+		"https://127.0.0.1/cb", "https://1.2.3.4/cb", "https://2130706433/cb", "https://0x7f000001/cb",
+		"https://example.0x7f/cb", "https://localhost/cb", "https://x:080/cb", "https://x:00443/cb",
 	} {
 		if CheckRedirectEntry(bad) == "" {
 			t.Errorf("%q accepted", bad)

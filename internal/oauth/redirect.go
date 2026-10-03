@@ -82,7 +82,7 @@ func (a allowlist) allows(uri string) bool {
 	return false
 }
 
-// isLoopbackRedirect reports whether uri is a native-client redirect: http on
+// isLoopbackRedirect reports whether uri is a native-client redirect: http (lowercase scheme, matched literally) on
 // localhost, 127.0.0.1 or [::1], any port (RFC 8252 section 7.3), with no
 // credentials, fragment, percent-encoding or dot segments. The host must
 // already be in its lowercase, no-trailing-dot form. Only these three hosts
@@ -90,6 +90,9 @@ func (a allowlist) allows(uri string) bool {
 // audit.
 func isLoopbackRedirect(uri string) bool {
 	if len(uri) > maxRedirectURIBytes {
+		return false
+	}
+	if !strings.HasPrefix(uri, "http://") {
 		return false
 	}
 	for _, r := range uri {
