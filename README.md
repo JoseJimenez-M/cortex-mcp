@@ -14,7 +14,7 @@ assistant behind them is replaceable.
 ![Go](https://img.shields.io/badge/Go-1.26-D97757)
 ![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-D97757)
 ![Auth](https://img.shields.io/badge/auth-OAuth%202.1%20%2B%20passkeys-D97757)
-![Status](https://img.shields.io/badge/status-pre--release-D97757)
+[![Release](https://img.shields.io/github/v/release/JoseJimenez-M/cortex-mcp?include_prereleases&color=D97757)](https://github.com/JoseJimenez-M/cortex-mcp/releases)
 [![CI](https://github.com/JoseJimenez-M/cortex-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/JoseJimenez-M/cortex-mcp/actions/workflows/ci.yml)
 
 </div>
@@ -82,10 +82,15 @@ appropriately.
 
 ## Install
 
-No release has been published yet, so build from source for now. Once a release exists, signed
-binaries and a signed container image (`ghcr.io/josejimenez-m/cortex-mcp`) are the recommended route,
-with signature verification, a systemd unit, and a Docker Compose example in
-[docs/install.md](docs/install.md).
+The first release candidate is out: [v0.1.0-rc.1](https://github.com/JoseJimenez-M/cortex-mcp/releases/tag/v0.1.0-rc.1).
+Signed binaries for Linux, macOS, and Windows, and a signed multi-arch container image:
+
+```bash
+docker pull ghcr.io/josejimenez-m/cortex-mcp:v0.1.0-rc.1
+```
+
+Verify the signature before running either one, then follow the systemd or Docker Compose setup in
+[docs/install.md](docs/install.md). To build from source instead:
 
 ```bash
 git clone https://github.com/JoseJimenez-M/cortex-mcp.git
