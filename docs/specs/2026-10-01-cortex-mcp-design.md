@@ -2,7 +2,7 @@
 type: decision
 status: draft
 created: 2026-10-01
-updated: 2026-10-02
+updated: 2026-10-03
 tags: [kind/repo, topic/dev]
 ---
 
@@ -13,10 +13,9 @@ vault or any folder of `.md` files) over the Model Context Protocol (MCP). The v
 "brain"; the AI behind it is replaceable.*
 
 Status: design approved. Plan 1 (core server: vault, tools, Bearer auth, rate limit, write log, `serve`
-and `token` commands) is implemented on branch `plan-1-core-server`. OAuth 2.1, `setup`, `reset-auth`,
-`clients`, and the release tooling are not built; sections 6.1, 6.2, 6.4, and 10 (releases, docs) describe
-planned work, as do the `WWW-Authenticate` link to the protected-resource metadata in 4.1 and the
-`bearer_tokens: false` (OAuth only) mode in 6.3 (both plan 2).
+and `token` commands) and plan 2 (OAuth 2.1, `setup`, `unlock-totp`, `reset-auth`, `clients`) are
+implemented. The release tooling and docs of section 10 are planned (plan 3). Decisions taken while
+building plan 2 are recorded in 6.6.
 
 ![Architecture](../diagrams/cortex-mcp-architecture.svg)
 
@@ -69,8 +68,8 @@ config/      Load and validate the single config file.
 adapter, or a future protocol, is a new thin layer over the same core, not a rewrite.
 
 **Dependencies.** Go standard library plus a small set of vetted libraries: the official MCP Go SDK,
-an OAuth 2.1 library (`ory/fosite` is the candidate), a WebAuthn library (`go-webauthn/webauthn`), a
-TOTP library, a pure-Go SQLite driver (no cgo, to keep static cross-compilation), and a YAML parser.
+an OAuth 2.1 library (`zitadel/oidc`, section 6.2), a WebAuthn library (`go-webauthn/webauthn`), TOTP
+from the standard library, a pure-Go SQLite driver (no cgo, to keep static cross-compilation), and a YAML parser.
 Every dependency must justify itself; the target is fewer than ten direct dependencies.
 
 **Runtime cost.** Expected 15–25 MB RAM idle, a static binary around 15–20 MB, a distroless container
@@ -123,9 +122,9 @@ On shutdown the server cancels every request context, so open event streams end 
 holding the drain.
 
 ### 4.1 Discovery
-Standard MCP Streamable HTTP at `/mcp`. An unauthenticated call returns `401`. Planned (plan 2): the
-`WWW-Authenticate` header will point to the OAuth protected-resource metadata (`resource_metadata`), so
-compliant clients can start the OAuth flow on their own.
+Standard MCP Streamable HTTP at `/mcp`. An unauthenticated call returns `401`. The
+`WWW-Authenticate` header points to the OAuth protected-resource metadata (`resource_metadata`) and names
+the `vault` scope, so compliant clients start the OAuth flow on their own.
 
 ### 4.2 Capabilities
 Tools only in v1. No MCP resources or prompts beyond the instructions below.
@@ -184,6 +183,10 @@ in a password manager, TOTP in a separate authenticator app, recovery codes offl
 never locks the owner out. `cortex-mcp reset-auth` on the host is the last resort and requires shell
 access.
 
+Registering a passkey needs a browser: `setup` prints a one-time link to the running server's `/enroll`
+page (token in the URL fragment, valid 10 minutes, and the page also asks for a current TOTP code);
+`setup -passkey` issues another.
+
 ### 6.2 OAuth 2.1 for assistant apps
 The server is its own authorization server (one less service to run), built on
 `github.com/zitadel/oidc/v3` (`op` package) for the protocol core: chosen on 2026-10-02 by the owner for
@@ -218,6 +221,15 @@ first `authorization_servers` entry:
   browser that started the request: unguessable request ids, a per-request CSRF token, a session
   cookie (`Secure`, `HttpOnly`, `SameSite=Lax`), `frame-ancestors 'none'`, and a rate limit on login
   attempts. The consent page names the client and shows its redirect host.
+- **Decisions made with plan 2:** login and consent are one page (it names the client and its redirect
+  host; approving means authenticating there); every grant receives `vault offline_access`, so assistants
+  get refresh tokens; presenting a used refresh token or a used code revokes the whole token family;
+  `/revoke` and `clients revoke` end the whole connection; `oauth.enabled` defaults to true (login
+  refuses until `setup` has run) and `false` removes every OAuth route; CIMD fetches are limited to
+  https on port 443, public addresses, no redirects, 5 s, 64 KiB, 10 new fetches a minute, cached 1
+  hour; `/register` is limited per source and globally (6.6) and keeps at most 50 never-used clients; no
+  CORS on any endpoint; after 50 consecutive wrong TOTP codes the TOTP factor locks until a passkey or
+  recovery code login (or `cortex-mcp unlock-totp` on the host).
 - **Tokens:** access tokens valid 1 hour, refresh tokens 30 days, rotated on use; the resource server
   always looks the token up in storage and never trusts a decrypted payload alone (the library's
   opaque format had a forgery advisory, GHSA-j8gq-92xf-382c, fixed in v3.47.0). One scope, `vault`,
@@ -228,13 +240,15 @@ first `authorization_servers` entry:
 ### 6.3 Bearer tokens (optional)
 For clients that cannot run a browser login (a CLI agent, scripts, cron). Created with
 `cortex-mcp token create <name>`, shown once, stored as a hash, revocable. Disabled entirely with
-`bearer_tokens: false` (possible only once OAuth is configured). Each token row has a random id that is never reused, and MCP sessions are bound
+`bearer_tokens: false` (refused by config validation unless `oauth.enabled` is true, and by `serve` until `setup` has run). Each token row has a random id that is never reused, and MCP sessions are bound
 to that id rather than to the name: a token re-created under a revoked name cannot reach the old
 token's sessions. The name stays the client label in logs and the rate limit key.
 
 ### 6.4 Client management
-`cortex-mcp clients list` and `cortex-mcp clients revoke <name>` cover both OAuth clients and Bearer
-tokens. Revoking one never affects the others.
+`cortex-mcp clients list` and `cortex-mcp clients revoke <id>` cover both OAuth clients and Bearer
+tokens. Revoking one never affects the others. A Bearer token's id is its name; an OAuth client's id is
+its DCR id or its CIMD URL, and its display name is accepted only when exactly one client has it (names
+are chosen by whoever registered the client, so they never shadow an id).
 
 ### 6.5 State
 Auth state (`auth.db`, SQLite, a few KB) and the write log live in `state_dir`, which is **outside
@@ -242,6 +256,57 @@ the vault**: config validation refuses a `state_dir` that is the vault or inside
 directory (sticky or world-writable, such as `/tmp`). Keeping secrets out of the vault means no sync tool or git backup can copy
 them by accident, whatever the operator's setup. `.cortex-mcp/` stays on the fixed protected list
 as defence in depth.
+
+### 6.6 Decisions taken while building plan 2
+Recorded so they are not re-derived. Each has tests in `internal/oauth`, `internal/authdb`, or
+`internal/server`.
+
+- **No foreign keys in `auth.db`.** A revocation deletes across `auth_codes`, `access_tokens`, and
+  `refresh_tokens` by family in one transaction, and tests assert that no row survives a family or
+  client revocation. Instead of cascades, every insert that depends on another row checks it in the same
+  transaction (a grant is created only while its client and its redeemed code still exist), so a
+  concurrent revocation can never leave a grant nothing would revoke.
+- **`_txlock=immediate`.** Every transaction takes the SQLite write lock at `BEGIN`. The CLI writes
+  `auth.db` while `serve` holds it open, and a deferred read-then-write transaction fails at once with
+  `SQLITE_BUSY` when the other process committed in between; `busy_timeout` only helps a wait at `BEGIN`.
+- **Canonical OAuth parameters before the library.** zitadel's form decoder matches keys
+  case-insensitively and in map order, so `REDIRECT_URI` could override the `redirect_uri` our pre-check
+  validated. `/authorize`, `/oauth/token`, and `/revoke` hand the library only exact known keys and
+  refuse case variants and repeats; `/authorize` refuses any `response_type` but `code`, and
+  `public_url` must be canonical (lowercase, no trailing dot, no default port) so the exact issuer and
+  resource comparisons hold.
+- **Registration eviction of never-used clients.** `/register` is unauthenticated and claude.ai registers
+  a new client per connection, so only clients without a grant count against a cap of 50. When full, the
+  oldest never-used client created at least 10 minutes ago is evicted (never one with an owner-approved
+  request in flight); if none qualifies, registration answers 503. Clients with a grant are never counted
+  or evicted, so junk registrations cannot starve or displace real connections.
+- **CIMD stale-serve for granted clients.** A client with a connection keeps working from its cached
+  metadata document for up to 24 hours when the document host cannot be reached (an outage, or an
+  attacker exhausting the shared fetch budget), with its own refetch budget. Transport failures, non-200
+  answers, and bodies that are not a JSON object count as unreachable (a broken or hijacked host can serve
+  them cheaply); only a well-formed document that policy refuses (client id mismatch, a redirect URI off
+  the allowlist, a non-public auth method) revokes the client at once. Clients without a grant get no
+  stale-serve.
+- **Rate key versus display name.** The `/mcp` rate limit keys on `Extra["ratekey"]`: `bearer:` plus the
+  token name, or the OAuth grant family. `Extra["client"]` (the token name or the sanitized OAuth client
+  name) only labels logs and `writes.log`. OAuth client names are chosen freely by registrations and two
+  may share one, so a name never keys a limit, a session, or a revocation by itself.
+- **Per-source limiters.** `/login` (every factor, including passkey begins and `/enroll/begin`) and
+  `/register` charge a per-source bucket before the global one (login: 5 then 2 a minute per source, 10 a
+  minute globally; registration: 5 then 1 every 6 minutes per source, 10 then 1 a minute globally), so one
+  source cannot spend the whole budget and lock the owner out. Buckets are LRU-bounded at 4096 sources and
+  IPv6 is grouped per /64. The source is the TCP peer, or the right-most untrusted `X-Forwarded-For` entry
+  when the peer is in config `trusted_proxies`; no other header is read.
+- **`setup -force` semantics.** It replaces the passkeys, TOTP secret, recovery codes, and enrollment
+  links in one transaction (never a moment with both sets, or none, valid) and drops approvals the old
+  factors gave that are not yet a grant (approved requests and unused codes). Used codes stay for replay
+  detection, and connected clients stay connected: cutting those off is `reset-auth`'s job.
+  `unlock-totp` clears the TOTP lock from the host without spending a recovery code.
+- **Enrollment links are single use.** The link token is consumed by the first passkey ceremony it starts,
+  after the TOTP code on the page is checked, so a wrong code never burns the link and a request without a
+  live link never counts a TOTP failure.
+- **Passkeys and IP hosts.** WebAuthn needs a DNS name as relying party id; with an IP in `public_url`
+  the server logs a warning and runs with TOTP and recovery codes only.
 
 ## 7. Configuration
 
@@ -254,7 +319,11 @@ public_url: https://mcp.example.com
 listen: "127.0.0.1:8080"            # address to bind; loopback by default, ":8080" in a container
 instructions_file: AGENTS.md        # vault-relative, optional
 deny: []                            # extra protected paths
-bearer_tokens: true                 # false = OAuth only (refused until OAuth exists)
+bearer_tokens: true                 # false = OAuth only (needs oauth.enabled and setup)
+oauth:
+  enabled: true
+  redirect_allowlist: [...]           # defaults in section 6.2; "loopback" for native clients
+trusted_proxies: []                 # reverse proxy networks whose X-Forwarded-For is believed
 limits:
   max_write_bytes: 1048576
   requests_per_minute: 60

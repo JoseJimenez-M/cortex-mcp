@@ -24,8 +24,10 @@ is missing, search for it (`grep -rn`), never assume. The design source of truth
 | HTTP, auth, rate limits, sessions | `internal/server/AGENTS.md` | spec sections 4 and 6 |
 | Config keys and defaults | `internal/config/config.go` | spec section 7, `config.example.yaml` |
 | Bearer tokens | `internal/tokens/tokens.go` | spec section 6.3 |
-| The auth database file, schema, migrations | `internal/authdb/authdb.go` | spec section 6.5 |
-| OAuth, owner login, OAuth clients | `internal/oauth/AGENTS.md` | spec section 6 |
+| The auth database file, schema, migrations | `internal/authdb/authdb.go` | spec sections 6.5 and 6.6 |
+| OAuth, owner login, OAuth clients | `internal/oauth/AGENTS.md` | spec section 6 (6.6: decisions) |
+| The login page, passkeys, TOTP | `internal/oauth/login.go`, `internal/oauth/webauthn.go` | spec section 6.1 |
+| OAuth client registration, CIMD, redirect allowlist | `internal/oauth/dcr.go`, `cimd.go`, `redirect.go` | spec section 6.2 |
 | Commands and flags | `internal/cli/cli.go` | `README.md` |
 | Executing planned work | the current file in `docs/plans/` | the spec sections it cites |
 
@@ -44,7 +46,8 @@ internal/config, internal/vault, internal/fsperm: leaves
 ```
 
 Imports point down only. `internal/vault`, `internal/config`, and `internal/fsperm` import nothing from this module. No package-level mutable
-state except `server.Version` (set by the linker).
+state except `server.Version` (set by the linker); `serve` also sets `slog.Default` once at startup so the
+OAuth library's logs join the JSON stream.
 
 ## Invariants: never break these
 
@@ -63,6 +66,12 @@ state except `server.Version` (set by the linker).
 8. **Writes are atomic** (`writeAtomic`) and **serialized per note** (`locks`).
 9. **The only outbound network call is the client metadata document fetch**
    (`internal/oauth/cimd.go`, `newSafeFetcher`), and it refuses non-public addresses.
+10. **Every OAuth token is checked against `auth.db`** on every use: expiry, audience (the `/mcp` URL),
+    and the client's existence come from the database, never from a decrypted token alone.
+11. **A redirect URI is used only if it is on `oauth.redirect_allowlist`**, compared raw, and checked
+    before the OAuth library can redirect anything to it.
+12. **Refresh tokens, codes, recovery codes, enrollment links, and browser cookies are stored only as
+    hashes**, and a reused refresh token or code revokes its whole family.
 
 A change that needs to bend one of these is a design change: stop and ask the owner.
 

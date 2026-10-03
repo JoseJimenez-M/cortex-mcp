@@ -6,10 +6,10 @@ durable memory; the assistant behind it is replaceable.
 
 ## Status
 
-Pre-release. Plan 1 (the core server) is implemented: the vault library, the twelve tools, Bearer-token
-authentication, rate limiting, the write log, and the `serve` and `token` commands. OAuth 2.1 (needed
-for apps such as claude.ai and ChatGPT), `setup`, and `reset-auth` are planned and not built. Until then
-the only way to authenticate is a Bearer token, so `bearer_tokens: false` is refused at startup.
+Pre-release. Implemented: the core server (vault library, twelve tools, rate limiting, write log), Bearer
+tokens for CLI agents and scripts, and OAuth 2.1 for assistant apps (claude.ai, ChatGPT, Meta Muse,
+Claude Code), with an owner login by passkey, TOTP, or recovery code. Release tooling and the licence
+file are planned (plan 3).
 
 ## Features
 
@@ -54,10 +54,45 @@ file but never change, move, or delete it.
 - Writes are atomic (temp file, fsync, rename) and serialized per note. Writes are refused with
   `disk_low` while the vault's filesystem has less than 1 GiB free (Linux and macOS), so a looping
   assistant cannot fill a shared disk; the rate limit bounds requests, not bytes.
-- Every route except `GET /healthz` requires a Bearer token. Tokens are random, shown once, and stored
-  only as hashes in `state_dir/auth.db`. Requests are rate limited per client.
-- An MCP session is bound to the token that opened it, not to the token's name: after `token revoke`, a
-  new token created with the same name cannot use the old token's sessions.
+- Every route except `GET /healthz` and the OAuth endpoints requires a token: a Bearer token from
+  `token create` or an OAuth access token. Bearer tokens and OAuth refresh tokens are stored only as
+  hashes in `state_dir/auth.db`; OAuth access tokens are opaque and always looked up there (expiry,
+  audience, and the client's existence come from the database, never from the token alone). Requests
+  are rate limited per client: per Bearer token name, or per OAuth connection, never per OAuth client
+  name (any registration can choose any name).
+- OAuth follows the MCP authorization spec (2025-11-25): PKCE with S256 only, the token bound to this
+  server's `/mcp` URL (RFC 8707), the `iss` parameter on every authorization response (RFC 9207), access
+  tokens valid 1 hour, refresh tokens valid 30 days and rotated on every use. Presenting a used refresh
+  token, or a used authorization code, revokes that whole connection; a client that retries a lost
+  refresh response must reconnect. An authorization code works once, including a failed exchange (a
+  wrong PKCE verifier spends it).
+- Clients register through `/register` (RFC 7591) or a client ID metadata document, and only with
+  redirect URIs on `oauth.redirect_allowlist` (by default claude.ai, ChatGPT, Meta Muse, and loopback for
+  native apps). Redirect URIs are compared exactly, never normalized. Metadata documents are fetched
+  over https on port 443 only, never from private, loopback, or other non-public addresses, without
+  following redirects, within 5 seconds and 64 KiB, at most 10 new fetches a minute, and cached for 1
+  hour. If the document host is briefly unreachable, a client that already has a connection keeps
+  working from the cache for up to 24 hours; a well-formed document that is refused (a redirect URI
+  off the allowlist, a different client id) ends it at once.
+- `/register` is rate limited per source address (5, then 1 every 6 minutes) and globally (10, then 1 a
+  minute). At most 50 registered clients that never completed a login are kept; when full, the oldest
+  one older than 10 minutes is evicted. Clients with a connection never count and are never evicted.
+- The login page is bound to the browser that started the authorization (a `Secure`, `HttpOnly`,
+  `SameSite=Lax` cookie), carries a per-request CSRF token, cannot be framed (CSP `frame-ancestors
+  'none'` with a per-page nonce), and names the client, its redirect host, and (for metadata documents)
+  the host that published it. Login attempts with any factor are limited per source address (5, then 2
+  a minute) and globally (10 a minute).
+- The owner logs in with a passkey (WebAuthn, user verification required, signature counter checked for
+  cloned authenticators), a TOTP code (a time step is accepted once), or one of ten single-use recovery
+  codes. After 50 consecutive wrong TOTP codes the TOTP factor locks until a passkey or recovery code
+  login, or `cortex-mcp unlock-totp` on the host. Passkeys need a DNS name in `public_url` (`localhost`
+  works); with an IP address the server logs a warning and offers TOTP and recovery codes only.
+- Recovery codes, refresh tokens, authorization codes, enrollment links, and browser cookies are stored
+  only as hashes. The TOTP secret and the OAuth signing and encryption keys are stored usable in
+  `auth.db`, which is why `state_dir` is kept out of the vault.
+- An MCP session is bound to the credential that opened it: a Bearer token's row (after `token revoke`,
+  a new token created with the same name cannot use the old token's sessions) or an OAuth connection
+  (stable across refreshes, so a session survives token rotation).
 - Each token can hold at most 16 live sessions (normal clients use 1 or 2). Opening one more gets
   `429 Too Many Requests` with `Retry-After`; a slot frees when a client ends its session or the session
   times out.
@@ -86,7 +121,8 @@ Requires Go (see `go.mod` for the version).
 ```bash
 go build -o bin/cortex-mcp ./cmd/cortex-mcp
 cp config.example.yaml config.yaml          # set vault, state_dir, public_url
-./bin/cortex-mcp token create -config config.yaml my-laptop
+./bin/cortex-mcp setup -config config.yaml               # the owner, for OAuth apps
+./bin/cortex-mcp token create -config config.yaml my-laptop  # optional: a Bearer token
 ./bin/cortex-mcp serve -config config.yaml
 ```
 
@@ -94,6 +130,11 @@ Commands:
 
 ```
 cortex-mcp serve [-config path]
+cortex-mcp setup [-config path] [-passkey | -force]
+cortex-mcp unlock-totp [-config path]
+cortex-mcp reset-auth [-config path] [-yes]
+cortex-mcp clients list [-config path]
+cortex-mcp clients revoke [-config path] ID
 cortex-mcp token create [-config path] NAME
 cortex-mcp token list [-config path]
 cortex-mcp token revoke [-config path] NAME
@@ -104,6 +145,23 @@ Flags go before `NAME`. The config path defaults to `$CORTEX_MCP_CONFIG`, then
 `/etc/cortex-mcp/config.yaml`. `token create` prints the secret once on stdout; store it then, it
 cannot be shown again. `serve` logs JSON to stderr and shuts down cleanly on SIGINT or SIGTERM (a second
 signal exits at once). `GET /healthz` answers `ok` without authentication; the MCP endpoint is `/mcp`.
+
+`setup` creates the owner who approves OAuth connections and prints three factors once: a TOTP URI for an
+authenticator app (and the secret, to type by hand), ten recovery codes, and a link to register a passkey
+(open it within 10 minutes while the server runs; it works once and asks for a current TOTP code). Keep
+the factors in different places, for example the passkey in a password manager, TOTP in an authenticator
+app, and the recovery codes offline, so losing one never locks you out. `setup` refuses to run twice:
+`setup -passkey` prints a new passkey link (to add another passkey), and `setup -force` replaces every
+factor at once (the old passkeys, authenticator entry, and recovery codes stop working, and approvals
+they gave that have not yet become a connection are dropped; connected clients stay connected).
+`unlock-totp` clears the TOTP lock after too many wrong codes. `reset-auth -yes` is the last resort: it
+deletes the owner's factors and disconnects every OAuth client (Bearer tokens stay); without `-yes` it
+asks you to type `reset`. `clients list` shows Bearer tokens and OAuth clients, one tab-separated line
+each, with the redirect hosts of every OAuth client; `clients revoke ID` removes one of either kind (an
+OAuth client's name is also accepted when exactly one client has it).
+
+Every command works while `serve` is running: they share `auth.db`, and the server reads owner and
+client state from it on each request.
 
 Every config key is documented in [`config.example.yaml`](config.example.yaml). Invalid values fail at
 startup with a message naming the key.
@@ -124,18 +182,74 @@ mcp.example.com {
 `flush_interval -1` disables response buffering so streamed (SSE) responses reach the client at once.
 
 The login page and client registration are rate-limited per client address. Behind a proxy every
-request comes from the proxy's address, so set `trusted_proxies` to the proxy's network (in a Docker
-deployment, the subnet of the network Caddy shares with the server); without it all clients share one
-bucket per limiter, which is safe but coarser.
+request comes from the proxy's address, so set `trusted_proxies` to the proxy's network; without it all
+clients share one bucket per limiter, which is safe but coarser. The server then reads
+`X-Forwarded-For` only from a TCP peer inside `trusted_proxies`, and takes the right-most entry that is
+not itself a listed proxy, so list only proxies that append the address they received from (Caddy
+does), and never a network that untrusted hosts can send from.
+
+### Caddy and cortex-mcp in Docker
+
+With both containers on one Docker network, Caddy proxies to the service name and the server listens on
+all interfaces inside its container (`listen: ":8080"`, with no published port). Find the network's
+subnet and list it in `trusted_proxies`:
+
+```bash
+docker network inspect <network> --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+```
+
+```yaml
+listen: ":8080"
+trusted_proxies: [172.18.0.0/16]   # the subnet printed above
+```
+
+The Caddyfile then uses `reverse_proxy cortex-mcp:8080` with the same `flush_interval -1`. `serve` logs
+a warning for the non-loopback `listen`, which is expected in a container. Run the owner commands inside
+the container, for example `docker compose exec cortex-mcp /cortex-mcp setup -config
+/config/config.yaml`; `reset-auth` there needs `-yes` or a TTY.
+
+### Upgrading from a plan 1 binary
+
+The first time this version opens `state_dir/auth.db` (`serve` or any command) it migrates the file
+from schema version 2 to 3 (it adds the OAuth tables; Bearer tokens are kept). The plan 1 binary refuses a version 3 database, so a rollback
+needs the old file. Stop the server and back up `auth.db` together with `auth.db-wal` and `auth.db-shm`
+(when present) before upgrading, then start the new binary and run `setup`.
+
+## Connect assistant apps (OAuth)
+
+Run `cortex-mcp setup` once on the host and register a passkey with the link it prints. Then add the
+server in the app with the MCP URL `https://mcp.example.com/mcp`:
+
+- **claude.ai** (web, desktop, and mobile): Settings, Connectors, Add custom connector, paste the URL.
+  claude.ai registers itself with a client ID metadata document or through `/register`; either works.
+- **ChatGPT**: turn on developer mode, then add a connector (an MCP server) with the URL and OAuth
+  authentication.
+- **Meta Muse**: add a custom connector from a chat, giving it the URL; it signs in with OAuth.
+
+The app opens this server's login page: check the client name and the redirect host (and, for a client
+metadata document, the host that published it), then approve with your passkey, an authenticator code,
+or a recovery code. `cortex-mcp clients list` then shows the connection, and `cortex-mcp clients revoke
+ID` ends it. Each app connection is labelled in `writes.log` with the name the app registered; the name
+is chosen by the app, so the redirect host on the login page is what identifies it.
 
 ## Connect Claude Code
+
+With OAuth (Claude Code opens the login page in your browser and registers itself with a loopback
+redirect URI):
+
+```bash
+claude mcp add --transport http cortex https://mcp.example.com/mcp
+```
+
+Or with a Bearer token, for machines without a browser:
 
 ```bash
 claude mcp add --transport http cortex https://mcp.example.com/mcp \
   --header "Authorization: Bearer <token>"
 ```
 
-Any MCP client that supports Streamable HTTP and a custom `Authorization` header can connect the same way.
+Any MCP client that supports Streamable HTTP and either OAuth or a custom `Authorization` header can
+connect the same way.
 
 ## Development
 
