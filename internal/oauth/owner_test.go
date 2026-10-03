@@ -20,7 +20,7 @@ func TestSetupOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(sec.TOTPURI, "otpauth://totp/") || len(sec.TOTPSecret) != 32 || len(sec.EnrollToken) != 43 {
-		t.Fatalf("secrets = %+v", sec)
+		t.Fatalf("secrets: URI prefix ok %v, secret length %d, enroll token length %d", strings.HasPrefix(sec.TOTPURI, "otpauth://totp/"), len(sec.TOTPSecret), len(sec.EnrollToken))
 	}
 	seen := map[string]bool{}
 	for _, c := range sec.RecoveryCodes {

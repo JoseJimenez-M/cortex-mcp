@@ -36,6 +36,12 @@ const (
 	authorizeGlobalBurst = 60
 	authorizeGlobalEvery = time.Second
 
+	// tokenSweepEvery is how often the token endpoint, which every connected
+	// client keeps using, may run the sweep. It shares the last-sweep time
+	// with the flow entry points (sweepEvery), so it adds a sweep only when
+	// no new flow has started for a while.
+	tokenSweepEvery = 5 * time.Minute
+
 	// browserCookie binds an authorization to the browser that started it.
 	// __Host- makes browsers refuse it unless it is Secure, host-only, and
 	// Path=/. Browsers (and Go's cookie jar) treat localhost as secure.
@@ -130,7 +136,7 @@ func New(o Options) (*Service, error) {
 		authorizeLimit:  newIPLimiter(authorizePerIPEvery, authorizePerIPBurst, ipLimiterSize),
 		authorizeGlobal: rate.NewLimiter(rate.Every(authorizeGlobalEvery), authorizeGlobalBurst),
 	}
-	s.reg.proxies = proxies
+	s.reg.proxies, s.reg.logger = proxies, o.Logger
 	s.login = newLoginPages(store, base, o.Logger)
 	s.login.proxies = proxies
 	if pk, err := newPasskeys(store, base, s.login, o.Logger); err != nil {
@@ -362,6 +368,9 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 // token wraps /oauth/token: only the two grants this server issues, and
 // the resource indicator if present.
 func (s *Service) token(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.sweepAfter(tokenSweepEvery); err != nil {
+		s.logger.Warn("sweep of expired OAuth state failed", "err", err)
+	}
 	r = r.WithContext(withSource(r.Context(), s.proxies.clientIP(r)))
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 	if err := r.ParseForm(); err != nil {

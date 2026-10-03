@@ -255,7 +255,7 @@ func (o *opStorage) CreateAccessAndRefreshTokens(_ context.Context, req op.Token
 		id, refresh, exp, err := o.s.issueForCode(r, o.mcpURL)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
-				o.logger.Warn("code exchange refused: the client, the redeemed code, or the family is gone", "client_id", r.ClientID, "family", r.Family)
+				o.logger.Warn("code exchange refused: the client, the redeemed code, or the family is gone", "client_id", logClientID(r.ClientID), "family", r.Family)
 				return "", "", time.Time{}, oidc.ErrInvalidGrant().WithDescription("the authorization code is no longer valid").WithParent(ErrNotFound)
 			}
 			o.logger.Error("issue tokens failed", "err", err)
@@ -340,6 +340,6 @@ func (o *opStorage) TerminateSession(context.Context, string, string) error { re
 func logReuse(l *slog.Logger, err error) {
 	var re reuseError
 	if errors.As(err, &re) {
-		l.Warn("refresh token reuse: grant revoked", "client_id", re.clientID, "family", re.family)
+		l.Warn("refresh token reuse: grant revoked", "client_id", logClientID(re.clientID), "family", re.family)
 	}
 }

@@ -173,7 +173,7 @@ func (e *testEnv) enrollBegin(t *testing.T, token string) map[string]any {
 	in, _ := json.Marshal(map[string]string{"token": token, "code": e.totpNow(t)})
 	status, out := postJSON(t, http.DefaultClient, e.url+"/enroll/begin", in)
 	if status != http.StatusOK {
-		t.Fatalf("enroll begin: %d %v", status, out)
+		t.Fatalf("enroll begin: %d %v", status, out["error"])
 	}
 	return out
 }
@@ -191,7 +191,7 @@ func (e *testEnv) enrollFinish(t *testing.T, k *softKey, begun map[string]any) (
 func (e *testEnv) enroll(t *testing.T, k *softKey, token string) {
 	t.Helper()
 	if status, out := e.enrollFinish(t, k, e.enrollBegin(t, token)); status != http.StatusOK {
-		t.Fatalf("enroll finish: %d %v", status, out)
+		t.Fatalf("enroll finish: %d %v", status, out["error"])
 	}
 }
 
@@ -258,11 +258,11 @@ func TestEnrollAndLoginWithPasskey(t *testing.T) {
 	}
 	status, out := e.passkeyLogin(t, k, id, csrfOf(t, body), nil)
 	if status != http.StatusOK || out["redirect"] != e.svc.login.callbackURL(id) {
-		t.Fatalf("passkey login: %d %v", status, out)
+		t.Fatalf("passkey login: %d %v", status, out["error"])
 	}
 	code := e.callback(t, e.browser, id).Query().Get("code")
 	if status, tok := e.exchange(t, clientID, code, loopbackRedirect, p.verifier, nil); status != http.StatusOK || tok["access_token"] == nil {
-		t.Fatalf("exchange: %d %v", status, tok)
+		t.Fatalf("exchange: %d %v", status, tok["error"])
 	}
 	// The stored credential carries the counter of the last login.
 	owner, err := e.svc.store.ownerUser()
@@ -436,7 +436,7 @@ func TestPasskeyCloneIsRefusedAndLogged(t *testing.T) {
 	id, csrf := e.pendingPasskeyLogin(t, clientID)
 	k.count = 9
 	if status, out := e.passkeyLogin(t, k, id, csrf, nil); status != http.StatusOK {
-		t.Fatalf("login at counter 10: %d %v", status, out)
+		t.Fatalf("login at counter 10: %d %v", status, out["error"])
 	}
 	id, csrf = e.pendingPasskeyLogin(t, clientID)
 	k.count = 3
@@ -492,7 +492,7 @@ func TestPasskeyLoginSharesTheLoginRateLimit(t *testing.T) {
 	}
 	status, out, h := e.passkeyBegin(t, form.Get("id"), form.Get("csrf"))
 	if status != http.StatusTooManyRequests || h.Get("Retry-After") == "" {
-		t.Fatalf("passkey begin past the per-source burst: %d %v", status, out)
+		t.Fatalf("passkey begin past the per-source burst: %d %v", status, out["error"])
 	}
 	// /enroll/begin with a live link is charged too (a junk one is not:
 	// TestJunkEnrollBeginIsFree).
@@ -519,7 +519,7 @@ func TestPasskeyLoginClearsTheTOTPLock(t *testing.T) {
 	clientID := e.register(t, loopbackRedirect)
 	id, csrf := e.pendingPasskeyLogin(t, clientID)
 	if status, out := e.passkeyLogin(t, k, id, csrf, nil); status != http.StatusOK {
-		t.Fatalf("passkey login while TOTP is locked: %d %v", status, out)
+		t.Fatalf("passkey login while TOTP is locked: %d %v", status, out["error"])
 	}
 	var fails int
 	if err := e.svc.store.db.QueryRow(`SELECT totp_failures FROM owner`).Scan(&fails); err != nil || fails != 0 {
@@ -555,7 +555,7 @@ func TestPasskeysRequireUserVerification(t *testing.T) {
 	id, csrf := e.pendingPasskeyLogin(t, e.register(t, loopbackRedirect))
 	status, out, _ := e.passkeyBegin(t, id, csrf)
 	if status != http.StatusOK || out["publicKey"].(map[string]any)["userVerification"] != "required" {
-		t.Fatalf("login options: %d %v", status, out)
+		t.Fatalf("login options: %d %v", status, out["error"])
 	}
 	k.flags = byte(protocol.FlagUserPresent)
 	challenge := out["publicKey"].(map[string]any)["challenge"].(string)
@@ -698,7 +698,7 @@ func TestPasskeyAssertionIsBoundToItsAuthRequest(t *testing.T) {
 	idB, csrfB := e.pendingPasskeyLogin(t, clientID)
 	_, outA, _ := e.passkeyBegin(t, idA, csrfA)
 	if status, out, _ := e.passkeyBegin(t, idB, csrfB); status != http.StatusOK {
-		t.Fatalf("begin B: %d %v", status, out)
+		t.Fatalf("begin B: %d %v", status, out["error"])
 	}
 	assertionA := k.get(t, outA["publicKey"].(map[string]any)["challenge"].(string), nil)
 	if status, _ := e.passkeyFinish(t, idB, csrfB, assertionA); status != http.StatusUnauthorized {
@@ -709,7 +709,7 @@ func TestPasskeyAssertionIsBoundToItsAuthRequest(t *testing.T) {
 	}
 	for _, id := range []string{idA, idB} {
 		if a, err := e.svc.store.authRequest(id); err != nil || a.IsDone {
-			t.Fatalf("auth request %s after a cross-request assertion: %v %+v", id, err, a)
+			t.Fatalf("auth request %s after a cross-request assertion: %v (approved: %v)", id, err, err == nil && a.IsDone)
 		}
 	}
 }
@@ -778,7 +778,7 @@ func TestFinishEnrollStorageErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status, out := e.enrollFinish(t, k, e.enrollBegin(t, token)); status != http.StatusConflict {
-		t.Fatalf("registering the same passkey twice: %d %v", status, out)
+		t.Fatalf("registering the same passkey twice: %d %v", status, out["error"])
 	}
 	// Any other storage failure is a 500 with fixed text.
 	if _, err := e.svc.store.db.Exec(`CREATE TRIGGER fail_insert BEFORE INSERT ON passkeys BEGIN SELECT RAISE(ABORT, 'disk on fire'); END`); err != nil {
@@ -787,7 +787,7 @@ func TestFinishEnrollStorageErrors(t *testing.T) {
 	token, _, _ = e.svc.store.NewEnrollment()
 	status, out := e.enrollFinish(t, newSoftKey(t, e.url), e.enrollBegin(t, token))
 	if status != http.StatusInternalServerError || strings.Contains(fmt.Sprint(out), "fire") {
-		t.Fatalf("storage failure: %d %v", status, out)
+		t.Fatalf("storage failure: %d %v", status, out["error"])
 	}
 }
 

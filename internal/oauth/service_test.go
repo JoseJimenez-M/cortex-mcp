@@ -133,7 +133,7 @@ func (e *testEnv) startAuthorize(t *testing.T, c *http.Client, u string) string 
 	}
 	loc := locationOf(t, resp)
 	if !strings.HasPrefix(loc.String(), e.url+"/login?id=") {
-		t.Fatalf("authorize redirected to %s", loc)
+		t.Fatalf("authorize redirected to %s", redacted(loc))
 	}
 	return loc.Query().Get("id")
 }
@@ -176,7 +176,7 @@ func (e *testEnv) approvedCode(t *testing.T, clientID string, p pkcePair) string
 	}
 	loc := e.callback(t, e.browser, id)
 	if loc.Query().Get("iss") != e.url || loc.Query().Get("state") != "st-1" {
-		t.Fatalf("callback redirect %s", loc)
+		t.Fatalf("callback redirect %s", redacted(loc))
 	}
 	return loc.Query().Get("code")
 }
@@ -235,7 +235,7 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	code := e.approvedCode(t, clientID, p)
 	status, tok := e.exchange(t, clientID, code, loopbackRedirect, p.verifier, nil)
 	if status != http.StatusOK || tok["token_type"] != "Bearer" || tok["scope"] != "vault offline_access" {
-		t.Fatalf("token response %d %v", status, tok)
+		t.Fatalf("token response %d %v", status, tok["error"])
 	}
 	if exp, _ := tok["expires_in"].(float64); exp < 3500 || exp > 3600 {
 		t.Fatalf("expires_in = %v", tok["expires_in"])
@@ -254,7 +254,7 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	}
 	// The code is single use, and replaying it revokes what it issued.
 	if status, out := e.exchange(t, clientID, code, loopbackRedirect, p.verifier, nil); status != http.StatusBadRequest || out["error"] != "invalid_grant" {
-		t.Fatalf("code replay = %d %v", status, out)
+		t.Fatalf("code replay = %d %v", status, out["error"])
 	}
 	if _, err := e.svc.Verify(context.Background(), access); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("code replay did not revoke the access token")
@@ -274,7 +274,7 @@ func TestPKCEMustBeS256(t *testing.T) {
 		}
 		loc := locationOf(t, resp)
 		if !strings.HasPrefix(loc.String(), loopbackRedirect) || loc.Query().Get("error") != "invalid_request" || loc.Query().Get("iss") != e.url || loc.Query().Get("state") != "st-1" {
-			t.Errorf("%s: redirected to %s", name, loc)
+			t.Errorf("%s: redirected to %s", name, redacted(loc))
 		}
 	}
 }
@@ -284,7 +284,7 @@ func TestPKCEVerifierChecked(t *testing.T) {
 	clientID := e.register(t, loopbackRedirect)
 	code := e.approvedCode(t, clientID, newPKCE())
 	if status, out := e.exchange(t, clientID, code, loopbackRedirect, newPKCE().verifier, nil); status != http.StatusBadRequest || out["error"] != "invalid_grant" {
-		t.Fatalf("wrong verifier = %d %v", status, out)
+		t.Fatalf("wrong verifier = %d %v", status, out["error"])
 	}
 }
 
@@ -320,7 +320,7 @@ func TestResourceIndicator(t *testing.T) {
 	}
 	if status, out := e.postForm(t, "/oauth/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"x"}, "client_id": {clientID},
 		"resource": {e.url + "/mcp", e.url + "/mcp"}}); status != http.StatusBadRequest || out["error"] != "invalid_target" {
-		t.Fatalf("token with two resources = %d %v", status, out)
+		t.Fatalf("token with two resources = %d %v", status, out["error"])
 	}
 
 	// Without a resource on either request, the token is still bound to
@@ -333,7 +333,7 @@ func TestResourceIndicator(t *testing.T) {
 	code := e.callback(t, e.browser, id).Query().Get("code")
 	status, tok := e.exchange(t, clientID, code, loopbackRedirect, p.verifier, url.Values{"resource": nil})
 	if status != http.StatusOK {
-		t.Fatalf("exchange without resource = %d %v", status, tok)
+		t.Fatalf("exchange without resource = %d %v", status, tok["error"])
 	}
 	if _, err := e.svc.Verify(context.Background(), tok["access_token"].(string)); err != nil {
 		t.Fatalf("token without resource does not verify: %v", err)
@@ -349,7 +349,7 @@ func TestDefaultScopeAndResponseMode(t *testing.T) {
 	clientID := e.register(t, loopbackRedirect)
 	id := e.startAuthorize(t, e.browser, e.authorizeURL(clientID, loopbackRedirect, newPKCE(), url.Values{"scope": nil}))
 	if a, err := e.svc.store.authRequest(id); err != nil || strings.Join(a.Scopes, " ") != "vault offline_access" {
-		t.Fatalf("scopes without a scope parameter = %+v, %v", a, err)
+		t.Fatalf("scopes without a scope parameter: %v", err)
 	}
 	for _, mode := range []string{"fragment", "form_post"} {
 		resp, err := e.browser.Get(e.authorizeURL(clientID, loopbackRedirect, newPKCE(), url.Values{"response_mode": {mode}}))
@@ -374,7 +374,7 @@ func TestIssOnLibraryErrorRedirects(t *testing.T) {
 	}
 	loc := locationOf(t, resp)
 	if loc.Query().Get("error") != "invalid_request" || loc.Query().Get("iss") != e.url || loc.Query().Get("state") != "st-1" {
-		t.Fatalf("error redirect %s", loc)
+		t.Fatalf("error redirect %s", redacted(loc))
 	}
 }
 
@@ -422,7 +422,7 @@ func TestBrowserCookieAndCallbackBinding(t *testing.T) {
 		t.Fatalf("callback from another browser: %d %q", r2.StatusCode, r2.Header.Get("Location"))
 	}
 	if loc := e.callback(t, e.browser, id); loc.Query().Get("code") == "" {
-		t.Fatalf("callback from the right browser: %s", loc)
+		t.Fatalf("callback from the right browser: %s", redacted(loc))
 	}
 }
 
@@ -469,10 +469,10 @@ func TestRefreshAndRevokeOverHTTP(t *testing.T) {
 	r1 := tok["refresh_token"].(string)
 	status, tok2 := e.postForm(t, "/oauth/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {r1}, "client_id": {clientID}, "resource": {e.url + "/mcp"}})
 	if status != http.StatusOK || tok2["refresh_token"] == r1 || tok2["access_token"] == "" {
-		t.Fatalf("refresh = %d %v", status, tok2)
+		t.Fatalf("refresh = %d %v", status, tok2["error"])
 	}
 	if status, out := e.postForm(t, "/oauth/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {r1}, "client_id": {clientID}}); status != http.StatusBadRequest || out["error"] != "invalid_grant" {
-		t.Fatalf("reuse = %d %v", status, out)
+		t.Fatalf("reuse = %d %v", status, out["error"])
 	}
 	if _, err := e.svc.Verify(context.Background(), tok2["access_token"].(string)); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("reuse did not revoke the family")
@@ -583,7 +583,7 @@ func TestIssOnCallbackErrorRedirect(t *testing.T) {
 	// Not approved yet: the library redirects interaction_required.
 	loc := e.callback(t, e.browser, id)
 	if !strings.HasPrefix(loc.String(), loopbackRedirect) || loc.Query().Get("error") != "interaction_required" || loc.Query().Get("iss") != e.url || loc.Query().Get("state") != "st-1" {
-		t.Fatalf("callback error redirect %s", loc)
+		t.Fatalf("callback error redirect %s", redacted(loc))
 	}
 }
 

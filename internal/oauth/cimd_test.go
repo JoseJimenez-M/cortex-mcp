@@ -502,7 +502,7 @@ func TestCIMDClientEndToEnd(t *testing.T) {
 	code := e.loginWithTOTP(t, e.browser, testCIMD, p)
 	status, tok := e.exchange(t, testCIMD, code, loopbackRedirect, p.verifier, nil)
 	if status != http.StatusOK {
-		t.Fatalf("token: %d %v", status, tok)
+		t.Fatalf("token: %d %v", status, tok["error"])
 	}
 	id, err := e.svc.Verify(context.Background(), tok["access_token"].(string))
 	if err != nil || id.ClientID != testCIMD || id.ClientName != "Doc App" || !strings.HasPrefix(id.UserID, "oauth:") {
@@ -511,7 +511,7 @@ func TestCIMDClientEndToEnd(t *testing.T) {
 	status, next := e.postForm(t, "/oauth/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok["refresh_token"].(string)},
 		"client_id": {testCIMD}, "resource": {e.url + "/mcp"}})
 	if status != http.StatusOK {
-		t.Fatalf("refresh: %d %v", status, next)
+		t.Fatalf("refresh: %d %v", status, next["error"])
 	}
 	if after, err := e.svc.Verify(context.Background(), next["access_token"].(string)); err != nil || after.UserID != id.UserID {
 		t.Fatalf("refreshed identity %+v, %v", after, err)

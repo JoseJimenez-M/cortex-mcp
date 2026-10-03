@@ -259,12 +259,12 @@ func (e oauthEnv) grant(t *testing.T, clientID string) (string, string) {
 		t.Fatal(err)
 	}
 	if res.Get("iss") != e.url || res.Get("state") != "s" {
-		t.Fatalf("authorization response %v", res)
+		t.Fatalf("authorization response: iss %q, state %q, error %q", res.Get("iss"), res.Get("state"), res.Get("error"))
 	}
 	status, tok := e.tokenRequest(t, url.Values{"grant_type": {"authorization_code"}, "code": {res.Get("code")}, "redirect_uri": {e2eRedirect},
 		"client_id": {clientID}, "code_verifier": {verifier}, "resource": {e.url + "/mcp"}})
 	if status != http.StatusOK {
-		t.Fatalf("token: %d %v", status, tok)
+		t.Fatalf("token: %d %v", status, tok["error"])
 	}
 	e.seen.add(tok["access_token"].(string), tok["refresh_token"].(string))
 	return tok["access_token"].(string), tok["refresh_token"].(string)

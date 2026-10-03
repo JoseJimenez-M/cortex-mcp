@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,7 @@ func TestOAuthEndToEndWithTheSDKClient(t *testing.T) {
 	}
 	tok, err := ts.Token()
 	if err != nil || tok.AccessToken == "" || tok.RefreshToken == "" {
-		t.Fatalf("token: %+v, %v", tok, err)
+		t.Fatalf("token: present %v, %v", tok != nil, err)
 	}
 	if len(codes) != 1 {
 		t.Fatalf("%d authorizations, want 1", len(codes))
@@ -106,7 +107,7 @@ func TestRefreshRotationKeepsTheMCPSession(t *testing.T) {
 	sid := connect(t, env{url: e.url}, access).ID()
 	status, tok := e.refresh(t, clientID, refresh)
 	if status != http.StatusOK || tok["refresh_token"] == refresh {
-		t.Fatalf("refresh: %d %v", status, tok)
+		t.Fatalf("refresh: %d %v", status, tok["error"])
 	}
 	if code := postWithSession(t, env{url: e.url}, tok["access_token"].(string), sid); code != http.StatusOK {
 		t.Fatalf("refreshed token on the same session: %d, want 200", code)
@@ -124,7 +125,7 @@ func TestRefreshReuseRevokesTheConnection(t *testing.T) {
 	_, r1 := e.grant(t, clientID)
 	_, tok := e.refresh(t, clientID, r1)
 	if status, out := e.refresh(t, clientID, r1); status != http.StatusBadRequest || out["error"] != "invalid_grant" {
-		t.Fatalf("reused refresh token: %d %v", status, out)
+		t.Fatalf("reused refresh token: %d %v", status, out["error"])
 	}
 	if code := post(t, e.url, "Bearer "+tok["access_token"].(string)); code != http.StatusUnauthorized {
 		t.Fatalf("access token after reuse: %d, want 401", code)
@@ -178,13 +179,33 @@ func TestClientsRevokeCutsOneClientOnly(t *testing.T) {
 	if code := post(t, e.url, "Bearer "+accessA); code != http.StatusUnauthorized {
 		t.Fatalf("revoked client's token: %d", code)
 	}
-	if status, _ := e.refresh(t, a, refreshA); status == http.StatusOK {
-		t.Fatal("revoked client refreshed")
+	if status, out := e.refresh(t, a, refreshA); status != http.StatusUnauthorized || out["error"] != "invalid_client" {
+		t.Fatalf("revoked client refreshed: %d %v, want 401 invalid_client", status, out["error"])
 	}
 	for name, tok := range map[string]string{"other client": accessB, "bearer": e.bearer} {
-		if code := post(t, e.url, "Bearer "+tok); code == http.StatusUnauthorized {
-			t.Errorf("%s refused after revoking another client", name)
+		if code := post(t, e.url, "Bearer "+tok); code != http.StatusOK {
+			t.Errorf("%s after revoking another client: %d, want 200", name, code)
 		}
+	}
+}
+
+// reset-auth drops every OAuth client and grant: their refresh tokens get
+// invalid_client (not a server error), and Bearer tokens keep working.
+func TestResetAuthCutsOAuthAndKeepsBearer(t *testing.T) {
+	e := setupOAuth(t, nil)
+	clientID := e.registerClient(t)
+	access, refresh := e.grant(t, clientID)
+	if err := e.svc.Store().ResetAuth(); err != nil {
+		t.Fatal(err)
+	}
+	if code := post(t, e.url, "Bearer "+access); code != http.StatusUnauthorized {
+		t.Fatalf("access token after reset-auth: %d, want 401", code)
+	}
+	if status, out := e.refresh(t, clientID, refresh); status != http.StatusUnauthorized || out["error"] != "invalid_client" {
+		t.Fatalf("refresh after reset-auth: %d %v, want 401 invalid_client", status, out["error"])
+	}
+	if code := post(t, e.url, "Bearer "+e.bearer); code != http.StatusOK {
+		t.Fatalf("bearer token after reset-auth: %d, want 200", code)
 	}
 }
 
@@ -220,6 +241,18 @@ func TestTokenForAnotherAudienceIsRefused(t *testing.T) {
 		t.Fatalf("token for another audience: %d %q", status, h)
 	}
 }
+
+// leaked reports whether secret appears in logs. A 6-digit TOTP code is
+// matched as a whole word: as a bare substring it would turn up by chance
+// in timestamps, durations, and ids.
+func leaked(logs, secret string) bool {
+	if totpLike.MatchString(secret) {
+		return regexp.MustCompile(`\b` + secret + `\b`).MatchString(logs)
+	}
+	return strings.Contains(logs, secret)
+}
+
+var totpLike = regexp.MustCompile(`^[0-9]{6}$`)
 
 // TestNoSecretReachesAnyLog runs every flow (TOTP and recovery code logins,
 // a failed login, code exchange, MCP use, refresh, reuse detection,
@@ -257,7 +290,7 @@ func TestNoSecretReachesAnyLog(t *testing.T) {
 	status, tok := e.tokenRequest(t, url.Values{"grant_type": {"authorization_code"}, "code": {res.Get("code")}, "redirect_uri": {e2eRedirect},
 		"client_id": {clientID}, "code_verifier": {verifier}, "resource": {e.url + "/mcp"}})
 	if status != http.StatusOK {
-		t.Fatalf("token after recovery login: %d %v", status, tok)
+		t.Fatalf("token after recovery login: %d %v", status, tok["error"])
 	}
 	e.seen.add(tok["access_token"].(string), tok["refresh_token"].(string))
 
@@ -319,8 +352,9 @@ func TestNoSecretReachesAnyLog(t *testing.T) {
 	if len(secrets) < 20 {
 		t.Fatalf("only %d secrets recorded", len(secrets))
 	}
+	all := logged.String() + "\n" + files.String()
 	for i, secret := range secrets {
-		if strings.Contains(logged.String(), secret) || strings.Contains(files.String(), secret) {
+		if leaked(all, secret) {
 			t.Fatalf("secret %d (of %d recorded) reached a log", i, len(secrets))
 		}
 	}

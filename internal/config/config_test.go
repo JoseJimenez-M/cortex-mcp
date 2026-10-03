@@ -107,7 +107,7 @@ func TestValidateOK(t *testing.T) {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	for _, u := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://mcp.example.com/", "https://mcp.example.com:8443",
-		"http://127.0.0.2:8080", "http://localhost:443", "https://mcp.example.com:80"} {
+		"http://127.0.0.2:8080", "http://localhost:443", "https://mcp.example.com:80", "https://xn--bcher-kva.example"} {
 		c := valid()
 		c.PublicURL = u
 		if err := c.Validate(); err != nil {
@@ -156,6 +156,8 @@ func TestValidateErrors(t *testing.T) {
 		"url fragment":           {func(c *Config) { c.PublicURL = "https://mcp.example.com#x" }, "public_url:"},
 		"url userinfo":           {func(c *Config) { c.PublicURL = "https://user:pw@mcp.example.com" }, "public_url:"},
 		"url user only":          {func(c *Config) { c.PublicURL = "https://user@mcp.example.com" }, "public_url:"},
+		"url non-ASCII host":     {func(c *Config) { c.PublicURL = "https://bücher.example" }, "public_url:"},
+		"url non-ASCII escaped":  {func(c *Config) { c.PublicURL = "https://b%C3%BCcher.example" }, "public_url:"},
 		"listen empty":           {func(c *Config) { c.Listen = "" }, "listen:"},
 		"listen port only":       {func(c *Config) { c.Listen = "8080" }, "listen:"},
 		"listen host only":       {func(c *Config) { c.Listen = "localhost" }, "listen:"},
@@ -346,12 +348,15 @@ func TestTrustedProxiesDefaultEmptyAndLoad(t *testing.T) {
 }
 
 func TestCheckTrustedProxy(t *testing.T) {
-	for _, ok := range []string{"172.18.0.0/16", "127.0.0.1/32", "10.0.0.0/8", "fd00::/8", "::1/128"} {
+	for _, ok := range []string{"172.18.0.0/16", "127.0.0.1/32", "10.0.0.0/8", "fd00::/32", "fd00:1:2:3::/64", "::1/128"} {
 		if msg := CheckTrustedProxy(ok); msg != "" {
 			t.Errorf("%q rejected: %s", ok, msg)
 		}
 	}
-	for _, bad := range []string{"", "nope", "172.18.0.2", "172.18.0.1/16", "0.0.0.0/0", "::/0", "::ffff:10.0.0.0/104", "10.0.0.0/33", " 10.0.0.0/8", "fe80::%eth0/64"} {
+	// Shorter than /8 (IPv4) or /32 (IPv6) trusts a large part of the
+	// internet to write X-Forwarded-For, a typo rather than a proxy network.
+	for _, bad := range []string{"", "nope", "172.18.0.2", "172.18.0.1/16", "0.0.0.0/0", "::/0", "::ffff:10.0.0.0/104", "10.0.0.0/33", " 10.0.0.0/8", "fe80::%eth0/64",
+		"8.0.0.0/7", "0.0.0.0/1", "fd00::/8", "2000::/3", "2001:db8::/31"} {
 		if msg := CheckTrustedProxy(bad); msg == "" {
 			t.Errorf("%q accepted", bad)
 		}

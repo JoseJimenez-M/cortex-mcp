@@ -316,13 +316,13 @@ func (p *passkeys) finishLogin(w http.ResponseWriter, r *http.Request) {
 	// was, so the genuine authenticator keeps working.
 	if cred.Authenticator.CloneWarning {
 		p.logger.Warn("passkey refused: its signature counter did not increase, the authenticator may be cloned",
-			"client_id", a.ClientID)
+			"client_id", logClientID(a.ClientID))
 		oauthError(w, http.StatusUnauthorized, "access_denied", "passkey not accepted")
 		return
 	}
 	if err := p.store.updatePasskey(cred); errors.Is(err, errCounterNotIncreased) {
 		p.logger.Warn("passkey refused: another login already recorded this signature counter, the authenticator may be cloned",
-			"client_id", a.ClientID)
+			"client_id", logClientID(a.ClientID))
 		oauthError(w, http.StatusUnauthorized, "access_denied", "passkey not accepted")
 		return
 	} else if err != nil {
@@ -339,7 +339,7 @@ func (p *passkeys) finishLogin(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "sign-in request not valid")
 		return
 	}
-	p.logger.Info("connection approved", "client_id", a.ClientID, "amr", "hwk")
+	p.logger.Info("connection approved", "client_id", logClientID(a.ClientID), "amr", "hwk")
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": p.login.callbackURL(a.ID)})
 }
 

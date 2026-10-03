@@ -297,6 +297,13 @@ func checkPublicURL(raw string) string {
 	if !strings.HasPrefix(raw, u.Scheme+"://") || u.Host != strings.ToLower(u.Host) || strings.HasSuffix(u.Hostname(), ".") {
 		return "must be written in canonical form: lowercase scheme and host, no trailing dot"
 	}
+	// An internationalized name has two spellings (Unicode and punycode),
+	// and clients may send either; only the ASCII one can be compared
+	// byte for byte. Path, query, and userinfo are refused below, so a
+	// percent sign can only be an escape in the host.
+	if strings.ContainsRune(raw, '%') || strings.IndexFunc(raw, func(r rune) bool { return r > 0x7e || r < 0x21 }) >= 0 {
+		return "host must be ASCII: write an internationalized name in its punycode form (xn--...)"
+	}
 	if p := u.Port(); (u.Scheme == "https" && p == "443") || (u.Scheme == "http" && p == "80") {
 		return "must not name the default port of its scheme"
 	}
@@ -411,6 +418,12 @@ func CheckTrustedProxy(e string) string {
 	}
 	if p.Bits() == 0 {
 		return "must not trust every address"
+	}
+	// A proxy network is a container network or a host: anything wider
+	// than /8 (IPv4) or /32 (IPv6) is a typo that would let a large part of
+	// the internet choose its own rate-limit bucket.
+	if (p.Addr().Is4() && p.Bits() < 8) || (p.Addr().Is6() && !p.Addr().Is4In6() && p.Bits() < 32) {
+		return "is too wide: use the proxy's own network (at least /8 for IPv4, /32 for IPv6)"
 	}
 	if p.Addr().Is4In6() {
 		return "use the plain IPv4 form instead of an IPv4-mapped IPv6 network"

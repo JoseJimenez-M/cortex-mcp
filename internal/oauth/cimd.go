@@ -55,6 +55,38 @@ var errCIMD = errors.New("client metadata document rejected")
 // a connected client; garbage bodies are treated like an unreachable host.
 var errCIMDPolicy = errors.New("policy")
 
+// maxLoggedHostBytes bounds a logged host (the longest DNS name).
+const maxLoggedHostBytes = 253
+
+// logClientID is how a client id appears in logs. A DCR id is ours (random
+// base32) and is logged as is. A metadata document URL is chosen by whoever
+// sends /authorize: only its host is logged, which is what the operator
+// needs to recognize the client, truncated to maxLoggedHostBytes so a long
+// name cannot bloat the log.
+func logClientID(id string) string {
+	if !isCIMDClientID(id) {
+		return id
+	}
+	host := "invalid-url"
+	if u, err := url.Parse(id); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	if len(host) > maxLoggedHostBytes {
+		host = host[:maxLoggedHostBytes]
+	}
+	return host
+}
+
+// withoutURL drops the URL from a fetch error (net/http puts the whole
+// request URL in *url.Error), keeping only the cause.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
+}
+
 // isCIMDClientID reports whether a client_id is a metadata document URL
 // rather than an id this server issued (DCR ids are base32, never URLs).
 func isCIMDClientID(id string) bool { return strings.HasPrefix(id, "https://") }
@@ -122,8 +154,10 @@ type cimdDoc struct {
 
 // parseCIMD validates an untrusted document: client_id must equal the URL it
 // was fetched from (the MCP spec requires an exact match), client_name is
-// required, the client must be public, and the redirect URIs must pass the
-// allowlist.
+// required, and the client must be public. Redirect URIs the allowlist
+// refuses are dropped (a publisher may list callbacks for other servers);
+// the ones kept must form a valid set (checkRedirectSet), so a document with
+// none left is refused.
 func parseCIMD(clientID string, body []byte, a allowlist) (clientRow, error) {
 	var d cimdDoc
 	if t := bytes.TrimSpace(body); len(t) == 0 || t[0] != '{' {
@@ -141,10 +175,16 @@ func parseCIMD(clientID string, body []byte, a allowlist) (clientRow, error) {
 	if m := d.TokenEndpointAuthMethod; m != "" && m != "none" {
 		return clientRow{}, fmt.Errorf("%w: %w: only public clients (token_endpoint_auth_method none) are supported", errCIMD, errCIMDPolicy)
 	}
-	if _, err := a.checkRedirectSet(d.RedirectURIs); err != nil {
+	var kept []string
+	for _, u := range d.RedirectURIs {
+		if a.allows(u) {
+			kept = append(kept, u)
+		}
+	}
+	if _, err := a.checkRedirectSet(kept); err != nil {
 		return clientRow{}, fmt.Errorf("%w: %w: %v", errCIMD, errCIMDPolicy, err)
 	}
-	return clientRow{ID: clientID, Kind: kindCIMD, Name: cleanName(d.ClientName), RedirectURIs: d.RedirectURIs}, nil
+	return clientRow{ID: clientID, Kind: kindCIMD, Name: cleanName(d.ClientName), RedirectURIs: kept}, nil
 }
 
 // blockedPrefixes are non-public ranges netip has no predicate for.
@@ -348,7 +388,8 @@ func (s *Store) makeRoomCIMD(id string, max int) error {
 }
 
 // logRateLimited logs at most once a minute, with the number of refusals
-// since the last line and never a client id (an attacker chooses them).
+// since the last line and no client id at all: under a flood the ids are
+// many and all chosen by the attacker, so even their hosts say nothing.
 func (c *cimdResolver) logRateLimited() {
 	now := c.store.now()
 	c.mu.Lock()
@@ -439,13 +480,13 @@ func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error
 	defer cancel()
 	body, err := c.fetch(ctx, id)
 	if err != nil {
-		c.logger.Warn("client metadata fetch failed", "client_id", id, "err", err)
+		c.logger.Warn("client metadata fetch failed", "client_id", logClientID(id), "err", withoutURL(err))
 		c.recordFailure(id)
 		return unreachable()
 	}
 	fresh, err := parseCIMD(id, body, c.allow)
 	if err != nil {
-		c.logger.Warn("client metadata document rejected", "client_id", id, "err", err)
+		c.logger.Warn("client metadata document rejected", "client_id", logClientID(id), "err", err)
 		c.recordFailure(id)
 		if !errors.Is(err, errCIMDPolicy) {
 			return unreachable()

@@ -128,7 +128,7 @@ func TestLoginWithTOTP(t *testing.T) {
 	p := newPKCE()
 	code := e.loginWithTOTP(t, e.browser, clientID, p)
 	if status, tok := e.exchange(t, clientID, code, loopbackRedirect, p.verifier, nil); status != http.StatusOK || tok["access_token"] == nil {
-		t.Fatalf("exchange after login: %d %v", status, tok)
+		t.Fatalf("exchange after login: %d %v", status, tok["error"])
 	}
 }
 

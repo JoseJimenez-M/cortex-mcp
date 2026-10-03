@@ -18,7 +18,6 @@ import (
 type browserKey struct{}
 
 var (
-	errClientNotFound      = errors.New("client not found")
 	errAuthRequestNotFound = errors.New("authorization request not found or expired")
 	errNotSupported        = errors.New("not supported by this server")
 	errStorage             = errors.New("storage error")
@@ -83,6 +82,14 @@ func keepScopes(s []string) []string { return s }
 
 // GetClientByClientID loads a DCR client from the table or a CIMD client
 // through the resolver, then re-applies the current redirect allowlist.
+// An unknown, revoked, or unusable client is invalid_client (the library
+// answers it with 401 at the token endpoint; a plain error would be a 500).
+// The error is built per call: the library sets fields on the value it
+// gets.
+func errUnknownClient() error {
+	return oidc.ErrInvalidClient().WithDescription("client not found")
+}
+
 func (o *opStorage) GetClientByClientID(ctx context.Context, id string) (op.Client, error) {
 	var row clientRow
 	var err error
@@ -95,7 +102,7 @@ func (o *opStorage) GetClientByClientID(ctx context.Context, id string) (op.Clie
 		if !errors.Is(err, ErrNotFound) && !errors.Is(err, errCIMD) {
 			o.logger.Error("client lookup failed", "err", err)
 		}
-		return nil, errClientNotFound
+		return nil, errUnknownClient()
 	}
 	var redirects []string
 	for _, u := range row.RedirectURIs {
@@ -104,7 +111,7 @@ func (o *opStorage) GetClientByClientID(ctx context.Context, id string) (op.Clie
 		}
 	}
 	if len(redirects) == 0 {
-		return nil, errClientNotFound
+		return nil, errUnknownClient()
 	}
 	return &client{id: row.ID, redirects: redirects, native: isLoopbackRedirect(redirects[0]), loginBase: o.base}, nil
 }
@@ -145,7 +152,9 @@ func (o *opStorage) CreateAuthRequest(ctx context.Context, req *oidc.AuthRequest
 	if browser == "" {
 		return nil, oidc.ErrServerError().WithDescription("the request did not pass through the authorize handler")
 	}
-	o.s.sweep()
+	if err := o.s.sweep(); err != nil {
+		o.logger.Warn("sweep of expired OAuth state failed", "err", err)
+	}
 	a := &authRequest{
 		ID: rand.Text(), ClientID: req.ClientID, RedirectURI: req.RedirectURI, State: req.State, Nonce: req.Nonce,
 		Challenge: req.CodeChallenge, Scopes: grantedScopes(), Browser: browser, CSRF: rand.Text(), Family: rand.Text(),

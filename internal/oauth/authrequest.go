@@ -249,24 +249,33 @@ func (s *Store) authRequestByCode(code string) (*authRequest, error) {
 	return a, err
 }
 
-// sweep deletes expired state at most once a minute. It runs from the
-// entry points of a new flow (CreateAuthRequest, /register), so the
-// tables stay small without a background goroutine. A failure is retried
-// on the next sweep; every read checks expiry itself, so a missed sweep
-// never extends a lifetime.
-func (s *Store) sweep() {
+// sweep deletes expired state at most once every sweepEvery. It runs from
+// the entry points of a new flow (CreateAuthRequest, /register) and, less
+// often, from the token endpoint (sweepAfter(tokenSweepEvery)), so the
+// tables stay small without a background goroutine. The callers log a
+// failure; the next sweep retries it, and every read checks expiry itself,
+// so a missed sweep never extends a lifetime.
+//
+// A used code is kept until authRequestTTL after it was issued, not just
+// its own codeTTL, so a replay that arrives late still finds it and
+// revokes the family its first use created.
+func (s *Store) sweep() error { return s.sweepAfter(sweepEvery) }
+
+// sweepAfter sweeps if at least d has passed since the last sweep (by any
+// caller).
+func (s *Store) sweepAfter(d time.Duration) error {
 	now := s.unix()
 	last := s.lastSweep.Load()
-	if now-last < int64(sweepEvery/time.Second) || !s.lastSweep.CompareAndSwap(last, now) {
-		return
+	if now-last < int64(d/time.Second) || !s.lastSweep.CompareAndSwap(last, now) {
+		return nil
 	}
-	_ = s.tx(func(tx *sql.Tx) error {
+	return s.tx(func(tx *sql.Tx) error {
 		for _, q := range []struct {
 			sql string
 			arg int64
 		}{
 			{`DELETE FROM auth_requests WHERE created <= ?`, now - int64(authRequestTTL/time.Second)},
-			{`DELETE FROM auth_codes WHERE expires <= ?`, now},
+			{`DELETE FROM auth_codes WHERE expires <= ?`, now - int64((authRequestTTL-codeTTL)/time.Second)},
 			{`DELETE FROM access_tokens WHERE expires <= ?`, now},
 			{`DELETE FROM refresh_tokens WHERE expires <= ?`, now},
 			{`DELETE FROM enrollments WHERE expires <= ?`, now},

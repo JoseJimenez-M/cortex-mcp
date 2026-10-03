@@ -173,15 +173,15 @@ func (l *loginPages) submit(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, errTOTPJustLocked):
 		l.logger.Warn("authenticator codes locked after too many failed attempts; a passkey or a recovery code unlocks them",
-			"failures", maxTOTPFailures, "client_id", a.ClientID)
+			"failures", maxTOTPFailures, "client_id", logClientID(a.ClientID))
 		l.renderLocked(w, a)
 		return
 	case errors.Is(err, errTOTPLocked):
-		l.logger.Info("login refused: authenticator codes are locked", "client_id", a.ClientID)
+		l.logger.Info("login refused: authenticator codes are locked", "client_id", logClientID(a.ClientID))
 		l.renderLocked(w, a)
 		return
 	case errors.Is(err, errBadCode):
-		l.logger.Warn("login failed: code not accepted", "client_id", a.ClientID)
+		l.logger.Warn("login failed: code not accepted", "client_id", logClientID(a.ClientID))
 		l.render(w, a, http.StatusUnauthorized, "Code not accepted.")
 		return
 	case errors.Is(err, ErrNotSetUp):
@@ -209,7 +209,7 @@ func (l *loginPages) approve(w http.ResponseWriter, r *http.Request, a *authRequ
 		l.invalid(w)
 		return
 	}
-	l.logger.Info("connection approved", "client_id", a.ClientID, "amr", amr)
+	l.logger.Info("connection approved", "client_id", logClientID(a.ClientID), "amr", amr)
 	http.Redirect(w, r, l.callbackURL(a.ID), http.StatusSeeOther) // #nosec G710 -- our own issuer URL; the id is a stored auth request id, query-escaped
 }
 
@@ -243,7 +243,7 @@ func (l *loginPages) deny(w http.ResponseWriter, r *http.Request) {
 	}
 	q.Set("iss", l.base)
 	u.RawQuery = q.Encode()
-	l.logger.Info("connection denied", "client_id", a.ClientID)
+	l.logger.Info("connection denied", "client_id", logClientID(a.ClientID))
 	http.Redirect(w, r, u.String(), http.StatusSeeOther)
 }
 

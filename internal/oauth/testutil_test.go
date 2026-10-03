@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -29,6 +30,18 @@ func (c *testClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.t = c.t.Add(d)
+}
+
+// redacted is u for a failure message, with any code replaced: tests never
+// print a secret (AGENTS.md invariant 5).
+func redacted(u *url.URL) string {
+	q := u.Query()
+	if q.Has("code") {
+		q.Set("code", "REDACTED")
+	}
+	c := *u
+	c.RawQuery = q.Encode()
+	return c.String()
 }
 
 func newTestStore(t *testing.T) (*Store, *testClock) {

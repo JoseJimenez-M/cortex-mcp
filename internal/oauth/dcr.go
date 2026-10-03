@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"time"
@@ -72,6 +73,7 @@ type registrar struct {
 	limit   *rate.Limiter // global
 	perIP   *ipLimiter
 	proxies trustedProxies // set by New; empty means the TCP peer is the source
+	logger  *slog.Logger   // set by New
 }
 
 // newRegistrar allows 60 valid registrations an hour with a burst of 10
@@ -85,8 +87,9 @@ type registrar struct {
 func newRegistrar(store *Store, allow allowlist) *registrar {
 	return &registrar{
 		store: store, allow: allow,
-		limit: rate.NewLimiter(rate.Every(time.Minute), registerGlobalBurst),
-		perIP: newIPLimiter(registerPerIPEvery, registerPerIPBurst, ipLimiterSize),
+		limit:  rate.NewLimiter(rate.Every(time.Minute), registerGlobalBurst),
+		perIP:  newIPLimiter(registerPerIPEvery, registerPerIPBurst, ipLimiterSize),
+		logger: slog.New(slog.DiscardHandler),
 	}
 }
 
@@ -116,7 +119,10 @@ func (g *registrar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many registrations, try again later")
 		return
 	}
-	g.store.sweep() // clients that never completed a grant free their slots here too
+	// Clients that never completed a grant free their slots here too.
+	if err := g.store.sweep(); err != nil {
+		g.logger.Warn("sweep of expired OAuth state failed", "err", err)
+	}
 	now := g.store.now()
 	row := clientRow{ID: rand.Text(), Kind: kindDCR, Name: reg.ClientName, RedirectURIs: reg.RedirectURIs, Created: now}
 	switch err := g.store.registerDCR(row, maxUnusedDCR, authRequestTTL); {

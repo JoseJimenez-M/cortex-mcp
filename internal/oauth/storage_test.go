@@ -228,7 +228,7 @@ func TestAuthRequestLifecycle(t *testing.T) {
 	a := req.(*authRequest)
 	if len(a.ID) != 26 || len(a.CSRF) != 26 || a.Browser != "BROWSERHASH" || a.Done() || a.GetState() != "xyz" ||
 		strings.Join(a.GetScopes(), " ") != "vault offline_access" || a.GetCodeChallenge().Method != oidc.CodeChallengeMethodS256 {
-		t.Fatalf("created = %+v", a)
+		t.Fatalf("created: id length %d, csrf length %d, done %v, state %q, scopes %v", len(a.ID), len(a.CSRF), a.Done(), a.GetState(), a.GetScopes())
 	}
 	got, err := o.AuthRequestByID(context.Background(), a.ID)
 	if err != nil || got.GetRedirectURI() != "http://127.0.0.1/callback" || got.GetNonce() != "n1" {

@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // loginData is the login and consent page. Script is a constant (see
@@ -24,9 +25,21 @@ type messageData struct{ Nonce, Title, Message string }
 
 func newNonce() string { return base64.StdEncoding.EncodeToString(randBytes(16)) }
 
+// originOf is the CSP source for a redirect URI: its origin, or for an
+// IPv6 literal host (in practice the loopback [::1], which the allowlist
+// admits for native clients) the scheme alone, such as "http:". The CSP
+// host-source grammar has no IPv6 literals, so browsers drop a source like
+// http://[::1]:8976 and the form-action would block the redirect to the
+// client. A scheme-source is the narrowest one browsers accept; it widens
+// form-action only on pages whose redirect is such a client, and the
+// forms on them post only to this server, with no markup an attacker
+// controls (html/template).
 func originOf(u *url.URL) string {
 	if u == nil || u.Scheme == "" || u.Host == "" {
 		return ""
+	}
+	if strings.Contains(u.Hostname(), ":") {
+		return u.Scheme + ":"
 	}
 	return u.Scheme + "://" + u.Host
 }
