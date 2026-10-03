@@ -66,8 +66,9 @@ A pull request without that line is not merged.
   go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 ./...
   ```
 
-  CI also checks `gofmt` and `go mod tidy`, runs each fuzz target briefly, lints the workflows, and
-  builds a release snapshot with GoReleaser.
+  CI also checks `gofmt`, `go mod tidy`, and that `THIRD_PARTY_NOTICES` is current (regenerate it with
+  `go run ./tools/thirdpartynotices > THIRD_PARTY_NOTICES` after a dependency change), runs each fuzz
+  target briefly, lints the workflows, and builds a release snapshot with GoReleaser.
 - **Commits.** Conventional Commits (`feat(vault): ...`, `fix(server): ...`, `docs: ...`), one logical
   change each.
 - **Style.** Idiomatic Go formatted with `gofmt`; comments explain why, not what. Docs, comments, and

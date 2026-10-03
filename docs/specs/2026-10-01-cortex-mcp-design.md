@@ -413,17 +413,18 @@ refactor. No production code without a test that required it.
   full flow, including OAuth with a scripted client.
 - **Concurrency**: tests run with `-race`.
 
-**CI on every pull request:** `gofmt`, `go mod tidy`, `go test -race ./...` with a coverage report, each
-fuzz target for 20 s, `go vet`, `staticcheck`, `govulncheck`, `gosec`, and, for the release path,
-`actionlint`, `goreleaser check`, and a full GoReleaser snapshot (every binary, archive, and SBOM, and
-both images); the snapshot's amd64 binary must report the snapshot version, and its image must run and
-carry the licence. A failing gate blocks merge.
+**CI on every pull request:** `gofmt`, `go mod tidy`, `THIRD_PARTY_NOTICES` regenerated without a diff,
+`go test -race ./...` with a coverage report, each fuzz target for 20 s, `go vet`, `staticcheck`,
+`govulncheck`, `gosec`, and, for the release path, `actionlint`, `goreleaser check`, and a full
+GoReleaser snapshot (every binary, archive, and SBOM, and both images); the snapshot's amd64 binary must
+report the snapshot version, its image must run and carry the licence, and every archive and the image
+must carry the committed `THIRD_PARTY_NOTICES`. A failing gate blocks merge.
 
 **Releases** (built with plan 3): GoReleaser v2 (`.goreleaser.yaml`) runs from
 `.github/workflows/release.yml` on `v*` tags. It builds linux/amd64, linux/arm64, darwin/amd64,
 darwin/arm64, and windows/amd64 binaries (`CGO_ENABLED=0`, `-trimpath`, `server.Version` set by the
-linker), archives them (tar.gz, zip for Windows) with `LICENSE`, `README.md`, `config.example.yaml`, and
-`docs/*.md`, writes `checksums.txt` and an SPDX SBOM per archive (syft), signs `checksums.txt` keylessly
+linker), archives them (tar.gz, zip for Windows) with `LICENSE`, `THIRD_PARTY_NOTICES`, `README.md`,
+`config.example.yaml`, and `docs/*.md`, writes `checksums.txt` and an SPDX SBOM per archive (syft), signs `checksums.txt` keylessly
 with cosign (a `.sigstore.json` bundle; GitHub OIDC identity of `release.yml` at the tag), and pushes a
 multi-arch image (linux/amd64, linux/arm64) to `ghcr.io/josejimenez-m/cortex-mcp` with `dockers_v2`,
 built from the same binaries on `gcr.io/distroless/static-debian13:nonroot` pinned by digest, with a

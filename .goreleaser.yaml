@@ -35,6 +35,7 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
+      - THIRD_PARTY_NOTICES
       - README.md
       - config.example.yaml
       - docs/*.md
@@ -80,6 +81,7 @@ dockers_v2:
       - linux/arm64
     extra_files:
       - LICENSE
+      - THIRD_PARTY_NOTICES
     labels:
       org.opencontainers.image.title: cortex-mcp
       org.opencontainers.image.description: MCP server that lets AI assistants read and write one Markdown vault

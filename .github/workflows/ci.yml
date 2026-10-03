@@ -20,6 +20,8 @@ jobs:
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: go mod tidy
         run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: third-party notices are current
+        run: go run ./tools/thirdpartynotices > THIRD_PARTY_NOTICES && git diff --exit-code THIRD_PARTY_NOTICES
       - name: vet
         run: go vet ./...
       - name: test
@@ -76,13 +78,15 @@ jobs:
           test "$(find dist -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 5
           test "$(find dist -maxdepth 1 -name '*.sbom.json' | wc -l)" -eq 5
           test "$(grep -c '' dist/checksums.txt)" -eq 10
+          for a in dist/*.tar.gz; do tar -xzOf "$a" THIRD_PARTY_NOTICES | cmp - THIRD_PARTY_NOTICES; done
+          for a in dist/*.zip; do unzip -p "$a" THIRD_PARTY_NOTICES | cmp - THIRD_PARTY_NOTICES; done
       - name: snapshot binary reports its version
         run: |
           bin=$(find dist -type f -name cortex-mcp -path '*linux_amd64*')
           out=$("$bin" version)
           echo "$out"
           case "$out" in "cortex-mcp v"*-SNAPSHOT-*) ;; *) echo "version not set by the linker"; exit 1 ;; esac
-      - name: snapshot image runs and carries the licence
+      - name: snapshot image runs and carries the licence and notices
         run: |
           img=$(docker image ls --format '{{.Repository}}:{{.Tag}}' ghcr.io/josejimenez-m/cortex-mcp | grep -- '-amd64$' | head -n 1)
           test -n "$img"
@@ -90,4 +94,5 @@ jobs:
           test "$(docker image inspect "$img" --format '{{.Config.User}}')" = 65532
           cid=$(docker create "$img")
           docker cp "$cid:/LICENSE" - | tar -xO | head -n 1 | grep -q '^# PolyForm Noncommercial License 1.0.0$'
+          docker cp "$cid:/THIRD_PARTY_NOTICES" - | tar -xO | cmp - THIRD_PARTY_NOTICES
           docker rm "$cid"

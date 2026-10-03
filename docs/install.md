@@ -29,9 +29,10 @@ release exists, build from source as shown in the [README](../README.md#quick-st
 ## Option A: release binary
 
 Each release has one archive per platform, `cortex-mcp_<version>_<os>_<arch>.tar.gz` (`.zip` for
-Windows), holding the `cortex-mcp` binary, `LICENSE`, `README.md`, `config.example.yaml`, and these
-docs. Next to them: `checksums.txt` (the SHA-256 of every file), its signature
-`checksums.txt.sigstore.json`, and an SPDX SBOM per archive (`<archive>.sbom.json`).
+Windows), holding the `cortex-mcp` binary, `LICENSE`, `THIRD_PARTY_NOTICES` (the licences of the Go
+standard library and modules built into it), `README.md`, `config.example.yaml`, and these docs. Next
+to them: `checksums.txt` (the SHA-256 of every file), its signature `checksums.txt.sigstore.json`, and
+an SPDX SBOM per archive (`<archive>.sbom.json`).
 
 On Linux, set `VERSION` to the release you install (without the leading `v`) and `ARCH` to `amd64` or
 `arm64`:
