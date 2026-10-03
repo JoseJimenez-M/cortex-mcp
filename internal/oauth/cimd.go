@@ -44,6 +44,14 @@ const (
 	cimdGlobalEvery = 6 * time.Second
 	cimdPerIPBurst  = 3
 	cimdPerIPEvery  = 30 * time.Second
+
+	// Documents hosted on the host of an allowlisted https redirect entry
+	// (claude.ai, chatgpt.com, agent.meta.ai by default) draw on a budget of
+	// their own, so junk ids that drain the general one cannot keep those
+	// apps from connecting: cimdAppBurst, then one every cimdAppEvery,
+	// behind the same per-source buckets.
+	cimdAppBurst = 5
+	cimdAppEvery = 10 * time.Second
 )
 
 // errCIMD is the only error a client sees for a bad document or a failed
@@ -75,6 +83,15 @@ func logClientID(id string) string {
 		host = host[:maxLoggedHostBytes]
 	}
 	return host
+}
+
+// cimdHost is the host of a checked CIMD client id ("" if unparsable).
+func cimdHost(id string) string {
+	u, err := url.Parse(id)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // withoutURL drops the URL from a fetch error (net/http puts the whole
@@ -311,7 +328,9 @@ type cimdResolver struct {
 	allow     allowlist
 	fetch     func(context.Context, string) ([]byte, error)
 	limit     *rate.Limiter // first-time fetches, driven by anonymous /authorize requests
-	perIP     *ipLimiter    // per source, in front of limit
+	perIP     *ipLimiter    // per source, in front of limit and appLimit
+	appHosts  map[string]bool
+	appLimit  *rate.Limiter // first-time fetches of ids on appHosts
 	refetch   *rate.Limiter // refreshes of clients we already hold, kept apart so flooding cannot starve them
 	logger    *slog.Logger
 	maxStored int
@@ -340,6 +359,8 @@ func newCIMDResolver(store *Store, allow allowlist, fetch func(context.Context, 
 		store: store, allow: allow, fetch: fetch, logger: logger,
 		limit:     rate.NewLimiter(rate.Every(cimdGlobalEvery), cimdGlobalBurst),
 		perIP:     newIPLimiter(cimdPerIPEvery, cimdPerIPBurst, ipLimiterSize),
+		appHosts:  allow.httpsHosts(),
+		appLimit:  rate.NewLimiter(rate.Every(cimdAppEvery), cimdAppBurst),
 		refetch:   rate.NewLimiter(rate.Every(2*time.Second), 20),
 		maxStored: cimdMaxStored,
 		failed:    map[string]time.Time{},
@@ -467,9 +488,12 @@ func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error
 	// (the source's bucket, then the global one; the source is the one
 	// Service put in ctx, or a shared bucket when there is none).
 	allowed := false
-	if granted {
+	switch {
+	case granted:
 		allowed = c.refetch.Allow()
-	} else {
+	case c.appHosts[cimdHost(id)]:
+		_, allowed = admitSource(c.perIP, c.appLimit, sourceFrom(ctx))
+	default:
 		_, allowed = admitSource(c.perIP, c.limit, sourceFrom(ctx))
 	}
 	if !allowed {

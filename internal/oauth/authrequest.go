@@ -18,11 +18,17 @@ const (
 	sweepEvery      = time.Minute
 
 	// Pending (not yet approved) authorization requests are capped, since
-	// /authorize is unauthenticated: beyond maxPendingPerClient for one
-	// client, or maxPendingAuthRequests overall, the oldest pending ones are
-	// deleted. An approved request (done = 1) is never evicted: only the
-	// owner can produce one, and its code is about to be exchanged.
-	maxPendingPerClient    = 20
+	// /authorize is unauthenticated, and the caps are fair per source (the
+	// rate-limit key, an IPv4 address or IPv6 /64): a source keeps at most
+	// maxPendingPerSource, its oldest going first. Beyond
+	// maxPendingAuthRequests overall, the oldest pending row of the source
+	// holding the most is deleted, so a source with a single row (the owner
+	// signing in) goes only when every source holds one, which takes
+	// maxPendingAuthRequests attacker sources. An approved request (done =
+	// 1) is never evicted: only the owner can produce one, and its code is
+	// about to be exchanged. These caps bound the table, so the global
+	// /authorize limiter only has to bound CPU.
+	maxPendingPerSource    = 10
 	maxPendingAuthRequests = 200
 	// ownerSubject is the sub of every token: there is one owner.
 	ownerSubject = "owner"
@@ -42,6 +48,7 @@ type authRequest struct {
 	ID, ClientID, RedirectURI, State, Nonce, Challenge string
 	Scopes                                             []string
 	Browser, CSRF, Family                              string
+	Source                                             string // the rate-limit key of the sender; written, never read back
 	AMR                                                []string
 	AuthTime                                           time.Time
 	IsDone                                             bool
@@ -116,25 +123,51 @@ func (s *Store) createAuthRequest(a *authRequest) error {
 	return s.tx(func(tx *sql.Tx) error {
 		// The client row must still exist: a CIMD revocation can delete it
 		// between the library's lookup and this insert.
-		res, err := tx.Exec(`INSERT INTO auth_requests(id, client_id, request, browser, csrf, family, created)
-			SELECT ?, id, ?, ?, ?, ?, ? FROM oauth_clients WHERE id = ?`,
-			a.ID, string(p), a.Browser, a.CSRF, a.Family, a.Created.Unix(), a.ClientID)
+		res, err := tx.Exec(`INSERT INTO auth_requests(id, client_id, request, browser, csrf, family, created, source)
+			SELECT ?, id, ?, ?, ?, ?, ?, ? FROM oauth_clients WHERE id = ?`,
+			a.ID, string(p), a.Browser, a.CSRF, a.Family, a.Created.Unix(), a.Source, a.ClientID)
 		if err != nil {
 			return err
 		}
 		if n, err := res.RowsAffected(); err != nil || n != 1 {
 			return ErrNotFound
 		}
-		// Newest first (rowid breaks ties within a second); everything past
-		// the cap goes. The new row is the newest, so it always stays.
+		// The source's own cap: newest first (rowid breaks ties within a
+		// second), everything past it goes. The new row is the newest, so it
+		// always stays.
 		if _, err := tx.Exec(`DELETE FROM auth_requests WHERE rowid IN (SELECT rowid FROM auth_requests
-			WHERE done = 0 AND client_id = ? ORDER BY created DESC, rowid DESC LIMIT -1 OFFSET ?)`, a.ClientID, maxPendingPerClient); err != nil {
+			WHERE done = 0 AND source = ? ORDER BY created DESC, rowid DESC LIMIT -1 OFFSET ?)`, a.Source, maxPendingPerSource); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`DELETE FROM auth_requests WHERE rowid IN (SELECT rowid FROM auth_requests
-			WHERE done = 0 ORDER BY created DESC, rowid DESC LIMIT -1 OFFSET ?)`, maxPendingAuthRequests)
-		return err
+		return evictOverGlobalCap(tx)
 	})
+}
+
+// evictOverGlobalCap deletes, while more than maxPendingAuthRequests are
+// pending, the oldest pending row of the source that holds the most (ties:
+// the source whose oldest row is oldest). One insert adds one row, so this
+// normally deletes at most one.
+func evictOverGlobalCap(tx *sql.Tx) error {
+	for {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM auth_requests WHERE done = 0`).Scan(&n); err != nil {
+			return err
+		}
+		if n <= maxPendingAuthRequests {
+			return nil
+		}
+		res, err := tx.Exec(`DELETE FROM auth_requests WHERE rowid = (
+			SELECT r.rowid FROM auth_requests r WHERE r.done = 0 AND r.source = (
+				SELECT source FROM auth_requests WHERE done = 0
+				GROUP BY source ORDER BY COUNT(*) DESC, MIN(created), MIN(rowid) LIMIT 1)
+			ORDER BY r.created, r.rowid LIMIT 1)`)
+		if err != nil {
+			return err
+		}
+		if k, err := res.RowsAffected(); err != nil || k != 1 {
+			return errors.New("pending cap: nothing to evict")
+		}
+	}
 }
 
 // authRequest loads a request younger than authRequestTTL, pending or

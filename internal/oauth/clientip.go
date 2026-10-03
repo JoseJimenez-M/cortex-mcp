@@ -101,6 +101,15 @@ func sourceFrom(ctx context.Context) netip.Addr {
 	return a
 }
 
+// sourceLabel is the stored form of a source's rate-limit key (sourceKey),
+// "" for an unknown source (they share one cap, like they share a bucket).
+func sourceLabel(a netip.Addr) string {
+	if p := sourceKey(a); p.IsValid() {
+		return p.String()
+	}
+	return ""
+}
+
 func remoteAddr(s string) netip.Addr {
 	if ap, err := netip.ParseAddrPort(s); err == nil {
 		return ap.Addr().Unmap().WithZone("")

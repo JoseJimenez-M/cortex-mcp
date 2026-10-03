@@ -27,14 +27,16 @@ const (
 
 	// /authorize is unauthenticated and every request may write a row or
 	// trigger a metadata fetch. A source gets authorizePerIPBurst requests,
-	// then one every authorizePerIPEvery (20 a minute); all sources together
-	// get authorizeGlobalBurst, then one a second. The owner's flows need a
-	// handful each, and three or more sources are needed to keep the global
-	// bucket empty.
+	// then one every authorizePerIPEvery (20 a minute). The global bucket
+	// (authorizeGlobalBurst, then 10 a second) is only a CPU circuit
+	// breaker: disk is bounded by the pending caps (maxPendingPerSource,
+	// maxPendingAuthRequests) and fetches by the CIMD budgets, so it can be
+	// wide enough that a handful of sources cannot empty it and lock the
+	// owner out (it takes about 30 sources at their own rate).
 	authorizePerIPBurst  = 20
 	authorizePerIPEvery  = 3 * time.Second
-	authorizeGlobalBurst = 60
-	authorizeGlobalEvery = time.Second
+	authorizeGlobalBurst = 600
+	authorizeGlobalEvery = 100 * time.Millisecond
 
 	// tokenSweepEvery is how often the token endpoint, which every connected
 	// client keeps using, may run the sweep. It shares the last-sweep time
@@ -357,6 +359,7 @@ func sameBrowser(r *http.Request, want string) bool {
 // callback wraps /authorize/callback: the code is only released to the
 // browser that started the authorization.
 func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withSource(r.Context(), s.proxies.clientIP(r)))
 	a, err := s.store.authRequest(r.URL.Query().Get("id"))
 	if err != nil || !sameBrowser(r, a.Browser) {
 		http.Error(w, "This sign-in request is not valid in this browser or has expired. Start the connection again from the assistant.", http.StatusBadRequest)
@@ -395,6 +398,7 @@ func (s *Service) token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) revoke(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withSource(r.Context(), s.proxies.clientIP(r)))
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "the request body is not a valid form")

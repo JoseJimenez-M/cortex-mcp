@@ -647,9 +647,7 @@ func TestCeremonies(t *testing.T) {
 	clk := newTestClock()
 	c := newCeremonies(clk.Now)
 	d := &webauthn.SessionData{Challenge: "c1"}
-	if !c.put("a", d) {
-		t.Fatal("put refused on an empty store")
-	}
+	c.put("a", d)
 	if got, ok := c.take("a"); !ok || got.Challenge != "c1" {
 		t.Fatalf("take = %v %v", got, ok)
 	}
@@ -664,24 +662,37 @@ func TestCeremonies(t *testing.T) {
 	}
 
 	for i := range maxCeremonies {
-		if !c.put(string(rune('A'+i)), d) {
-			t.Fatalf("put %d refused below the cap", i)
-		}
+		clk.Advance(time.Millisecond) // a strict age order, for the eviction below
+		c.put(string(rune('A'+i)), d)
 	}
-	if c.put("one-too-many", d) {
-		t.Fatal("put accepted past maxCeremonies")
+	// At the cap, a new ceremony evicts the oldest instead of being refused,
+	// so a flood of begins can never keep the owner from starting one.
+	clk.Advance(time.Second)
+	c.put("fresh-owner", d)
+	if n := len(c.m); n != maxCeremonies {
+		t.Fatalf("%d ceremonies held, cap %d", n, maxCeremonies)
 	}
+	if _, ok := c.take(string(rune('A'))); ok {
+		t.Fatal("the oldest ceremony was not the one evicted")
+	}
+	if _, ok := c.take("fresh-owner"); !ok {
+		t.Fatal("the fresh ceremony was not kept")
+	}
+	c.put("A", d)
+	c.put("refill", d) // at the cap again
 	// Restarting a ceremony under the same key replaces it, even at the cap.
-	if !c.put("A", &webauthn.SessionData{Challenge: "c2"}) {
-		t.Fatal("replacing a ceremony at the cap was refused")
+	c.put("A", &webauthn.SessionData{Challenge: "c2"})
+	if n := len(c.m); n != maxCeremonies {
+		t.Fatalf("replacing at the cap changed the count to %d", n)
 	}
 	if got, _ := c.take("A"); got.Challenge != "c2" {
 		t.Fatalf("replaced ceremony = %v", got)
 	}
 	// Expired ceremonies free their slots.
 	clk.Advance(ceremonyTTL + time.Second)
-	if !c.put("fresh", d) {
-		t.Fatal("expired ceremonies still count against the cap")
+	c.put("fresh", d)
+	if n := len(c.m); n != 1 {
+		t.Fatalf("expired ceremonies kept: %d held", n)
 	}
 }
 
@@ -724,18 +735,6 @@ func TestPasskeyForeignUserHandleIsRefused(t *testing.T) {
 	id, csrf := e.pendingPasskeyLogin(t, e.register(t, loopbackRedirect))
 	if status, _ := e.passkeyLogin(t, k, id, csrf, nil); status != http.StatusUnauthorized {
 		t.Fatalf("foreign user handle: %d", status)
-	}
-}
-
-// Admitted begins alone can never fill the ceremony map. A login ceremony
-// is keyed by a live auth request, so within one ceremonyTTL at most the
-// requests pending at its start plus those /authorize admits during it can
-// hold one; registration ceremonies need an enrollment link (the owner's),
-// and get the rest of the room.
-func TestCeremonyCapExceedsTheLoginBudget(t *testing.T) {
-	loginKeys := maxPendingAuthRequests + authorizeGlobalBurst + int(ceremonyTTL/authorizeGlobalEvery)
-	if room := maxCeremonies - loginKeys; room < 64 {
-		t.Fatalf("login ceremonies per ceremonyTTL can reach %d of maxCeremonies %d: %d left for enrollment", loginKeys, maxCeremonies, room)
 	}
 }
 

@@ -158,7 +158,7 @@ func (o *opStorage) CreateAuthRequest(ctx context.Context, req *oidc.AuthRequest
 	a := &authRequest{
 		ID: rand.Text(), ClientID: req.ClientID, RedirectURI: req.RedirectURI, State: req.State, Nonce: req.Nonce,
 		Challenge: req.CodeChallenge, Scopes: grantedScopes(), Browser: browser, CSRF: rand.Text(), Family: rand.Text(),
-		Created: o.s.now(),
+		Created: o.s.now(), Source: sourceLabel(sourceFrom(ctx)),
 	}
 	if err := o.s.createAuthRequest(a); err != nil {
 		if !errors.Is(err, ErrNotFound) {

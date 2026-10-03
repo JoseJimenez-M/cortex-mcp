@@ -19,14 +19,12 @@ import (
 
 const (
 	ceremonyTTL = 5 * time.Minute
-	// maxCeremonies bounds the open WebAuthn challenges. Passkey begins are
-	// charged to the source only (loginPages.admitPasskey), so the bound
-	// comes from what a begin needs: a login ceremony is keyed by a live
-	// auth request, and auth requests are created only through /authorize,
-	// whose global limiter and pending cap bound how many distinct ones can
-	// be begun within one ceremonyTTL (TestCeremonyCapExceedsTheLoginBudget);
-	// a registration ceremony needs an enrollment link, which only the owner
-	// has. About 300 bytes each.
+	// maxCeremonies bounds the open WebAuthn challenges (about 300 bytes
+	// each). When full, the oldest ceremony is evicted rather than the new
+	// one refused, so a flood of begins can never keep the owner from
+	// starting one; evicting the owner's own needs maxCeremonies newer begins
+	// within its few seconds, each charged to its source's login bucket and
+	// tied to a pending auth request of that source.
 	maxCeremonies      = 1024
 	maxCredentialBytes = 64 << 10
 	maxEnrollBodyBytes = 4 << 10
@@ -162,23 +160,27 @@ func newCeremonies(now func() time.Time) *ceremonies {
 }
 
 // put stores a ceremony, replacing one under the same key (a login button
-// pressed twice); false when maxCeremonies others are already open, which
-// bounds memory against a flood of begin requests (see maxCeremonies for
-// why admitted begins alone cannot reach the cap).
-func (c *ceremonies) put(key string, d *webauthn.SessionData) bool {
+// pressed twice). With maxCeremonies others open, the oldest is evicted:
+// memory stays bounded against a flood of begins, and a fresh ceremony (the
+// owner's) always gets in.
+func (c *ceremonies) put(key string, d *webauthn.SessionData) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
+	oldest, oldestExp := "", time.Time{}
 	for k, v := range c.m {
 		if !now.Before(v.expires) {
 			delete(c.m, k)
+			continue
+		}
+		if oldest == "" || v.expires.Before(oldestExp) {
+			oldest, oldestExp = k, v.expires
 		}
 	}
 	if _, replacing := c.m[key]; !replacing && len(c.m) >= maxCeremonies {
-		return false
+		delete(c.m, oldest)
 	}
 	c.m[key] = ceremony{data: *d, expires: now.Add(ceremonyTTL)}
-	return true
 }
 
 // take removes and returns a ceremony: each challenge is answered once.
@@ -257,10 +259,7 @@ func (p *passkeys) beginLogin(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusInternalServerError, "server_error", "passkey login could not start")
 		return
 	}
-	if !p.cer.put("login:"+a.ID, sess) {
-		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "too many passkey ceremonies in progress")
-		return
-	}
+	p.cer.put("login:"+a.ID, sess)
 	writeJSON(w, http.StatusOK, assertion)
 }
 
@@ -389,9 +388,6 @@ func (p *passkeys) beginEnroll(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrNotFound):
 		oauthError(w, http.StatusBadRequest, "invalid_request", expired)
 		return
-	case errors.Is(err, errCeremoniesFull):
-		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "too many passkey ceremonies in progress")
-		return
 	case err != nil:
 		p.logger.Error("passkey registration could not start", "err", err)
 		oauthError(w, http.StatusInternalServerError, "server_error", "registration could not start")
@@ -399,8 +395,6 @@ func (p *passkeys) beginEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": key, "options": creation})
 }
-
-var errCeremoniesFull = errors.New("too many passkey ceremonies in progress")
 
 // startEnrollment consumes the enrollment link (a single-use DELETE) and
 // only then opens a registration ceremony. Two requests racing on one link
@@ -421,9 +415,7 @@ func (p *passkeys) startEnrollment(token string) (string, *protocol.CredentialCr
 		return "", nil, err
 	}
 	key := rand.Text()
-	if !p.cer.put("enroll:"+key, sess) {
-		return "", nil, errCeremoniesFull
-	}
+	p.cer.put("enroll:"+key, sess)
 	return key, creation, nil
 }
 

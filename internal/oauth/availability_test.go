@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,6 +81,9 @@ func TestAuthorizeRefusesOversizedStateAndNonce(t *testing.T) {
 // metadata fetch) is bounded.
 func TestAuthorizeIsRateLimitedPerSourceAndGlobally(t *testing.T) {
 	e := newTestEnvWith(t, func(o *Options) { o.TrustedProxies = []string{"127.0.0.0/8"} })
+	// The production burst without its refill (10 a second would refill a
+	// few tokens while the test spends 600).
+	e.svc.authorizeGlobal = rate.NewLimiter(rate.Every(time.Hour), authorizeGlobalBurst)
 	for i := 0; i < authorizePerIPBurst; i++ {
 		if resp := getFrom(t, e.browser, e.url+"/authorize", "203.0.113.1"); resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("a, request %d: %d", i, resp.StatusCode)
@@ -111,53 +115,186 @@ func TestAuthorizeIsRateLimitedPerSourceAndGlobally(t *testing.T) {
 	}
 }
 
-// Pending (not yet approved) authorization requests are capped per client
-// and globally; the oldest pending ones go first, and an approved one is
-// never evicted.
-func TestPendingAuthRequestsAreCapped(t *testing.T) {
+// createFrom opens a pending auth request for clientID as if /authorize
+// had been called from src.
+func createFrom(t *testing.T, o *opStorage, clientID, src string) string {
+	t.Helper()
+	ctx := withSource(withBrowser(), netip.MustParseAddr(src))
+	req, err := o.CreateAuthRequest(ctx, &oidc.AuthRequest{ClientID: clientID, RedirectURI: loopbackRedirect,
+		CodeChallenge: s256("verifier"), CodeChallengeMethod: oidc.CodeChallengeMethodS256}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req.GetID()
+}
+
+func pendingCount(t *testing.T, s *Store) int {
+	t.Helper()
+	return count(t, s, `SELECT COUNT(*) FROM auth_requests WHERE done = 0`)
+}
+
+// Pending requests are capped per source (the /32 or /64 clientIP keys
+// limits on), oldest first; an approved one is never evicted.
+func TestPendingAuthRequestsAreCappedPerSource(t *testing.T) {
 	o, s, clk := newTestOP(t)
 	addClient(t, s, "A", loopbackRedirect)
 	approved := newApproved(t, o, "A", loopbackRedirect)
-	var first string
-	for i := 0; i < maxPendingPerClient+5; i++ {
-		req, err := o.CreateAuthRequest(withBrowser(), &oidc.AuthRequest{ClientID: "A", RedirectURI: loopbackRedirect,
-			CodeChallenge: s256("verifier"), CodeChallengeMethod: oidc.CodeChallengeMethodS256}, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if i == 0 {
-			first = req.GetID()
-		}
+	first := createFrom(t, o, "A", "203.0.113.9")
+	for i := 0; i < 3*maxPendingPerSource; i++ {
 		clk.Advance(time.Second)
+		createFrom(t, o, "A", "203.0.113.9")
 	}
-	var pending int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM auth_requests WHERE client_id = 'A' AND done = 0`).Scan(&pending); err != nil || pending != maxPendingPerClient {
-		t.Fatalf("pending for one client = %d, %v; want %d", pending, err, maxPendingPerClient)
+	if n := count(t, s, `SELECT COUNT(*) FROM auth_requests WHERE done = 0 AND source = ?`, "203.0.113.9/32"); n != maxPendingPerSource {
+		t.Fatalf("pending for one source = %d, want %d", n, maxPendingPerSource)
 	}
 	if _, err := s.authRequest(first); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("the oldest pending request survived: %v", err)
+		t.Fatalf("the oldest pending request of the source survived: %v", err)
+	}
+	// IPv6 sources share a cap per /64.
+	for i := 0; i < 2*maxPendingPerSource; i++ {
+		createFrom(t, o, "A", fmt.Sprintf("2001:db8:1:2::%x", i+1))
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM auth_requests WHERE done = 0 AND source = ?`, "2001:db8:1:2::/64"); n != maxPendingPerSource {
+		t.Fatalf("pending for one /64 = %d, want %d", n, maxPendingPerSource)
 	}
 	if a, err := s.authRequest(approved.ID); err != nil || !a.IsDone {
 		t.Fatalf("the approved request was evicted: %v", err)
 	}
+}
 
-	// Globally: many clients, each under its own cap.
-	for c := 0; c*maxPendingPerClient < maxPendingAuthRequests+maxPendingPerClient; c++ {
-		id := fmt.Sprintf("C%03d", c)
-		addClient(t, s, id, loopbackRedirect)
-		for i := 0; i < maxPendingPerClient; i++ {
-			if _, err := o.CreateAuthRequest(withBrowser(), &oidc.AuthRequest{ClientID: id, RedirectURI: loopbackRedirect,
-				CodeChallenge: s256("verifier"), CodeChallengeMethod: oidc.CodeChallengeMethodS256}, ""); err != nil {
-				t.Fatal(err)
-			}
-		}
-		clk.Advance(time.Second)
+// The owner's single pending request survives a flood: one attacker source
+// is held to its own cap, and the global cap evicts from the source holding
+// the most rows. Only when the attacker holds one row in each of enough
+// sources to fill the global cap alone is the owner's (oldest) row at risk.
+func TestOwnersPendingRequestSurvivesAFlood(t *testing.T) {
+	o, s, clk := newTestOP(t)
+	addClient(t, s, "A", loopbackRedirect)
+	approved := newApproved(t, o, "A", loopbackRedirect)
+	owner := createFrom(t, o, "A", "198.51.100.1")
+	clk.Advance(time.Second)
+	for i := 0; i < 50; i++ {
+		createFrom(t, o, "A", "203.0.113.1")
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM auth_requests WHERE done = 0`).Scan(&pending); err != nil || pending != maxPendingAuthRequests {
-		t.Fatalf("pending overall = %d, %v; want %d", pending, err, maxPendingAuthRequests)
+	if _, err := s.authRequest(owner); err != nil {
+		t.Fatalf("one attacker source evicted the owner's request: %v", err)
+	}
+	// Many attacker sources, each at its own cap: the global cap evicts
+	// from the fullest sources, never the owner's single row.
+	for src := 2; src <= 2*maxPendingAuthRequests/maxPendingPerSource; src++ {
+		for i := 0; i < maxPendingPerSource; i++ {
+			createFrom(t, o, "A", fmt.Sprintf("203.0.%d.%d", 113+src/250, src%250))
+		}
+	}
+	if n := pendingCount(t, s); n != maxPendingAuthRequests {
+		t.Fatalf("pending overall = %d, want %d", n, maxPendingAuthRequests)
+	}
+	if _, err := s.authRequest(owner); err != nil {
+		t.Fatalf("attackers at their per-source caps evicted the owner's request: %v", err)
 	}
 	if a, err := s.authRequest(approved.ID); err != nil || !a.IsDone {
-		t.Fatalf("the approved request was evicted by the global cap: %v", err)
+		t.Fatalf("the approved request was evicted: %v", err)
+	}
+}
+
+// Evicting the owner's single row takes as many attacker sources as the
+// global cap, each holding one row: 199 are not enough, 200 are.
+func TestEvictingASingleRowTakesAGlobalCapOfSources(t *testing.T) {
+	o, s, clk := newTestOP(t)
+	addClient(t, s, "A", loopbackRedirect)
+	owner := createFrom(t, o, "A", "198.51.100.1")
+	clk.Advance(time.Second)
+	attacker := func(i int) string { return fmt.Sprintf("10.%d.%d.1", i/250, i%250) }
+	for i := 0; i < maxPendingAuthRequests-1; i++ {
+		createFrom(t, o, "A", attacker(i))
+	}
+	if _, err := s.authRequest(owner); err != nil {
+		t.Fatalf("%d single-row sources evicted the owner's request: %v", maxPendingAuthRequests-1, err)
+	}
+	createFrom(t, o, "A", attacker(maxPendingAuthRequests-1))
+	if _, err := s.authRequest(owner); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("%d single-row sources did not evict the oldest row: %v", maxPendingAuthRequests, err)
+	}
+	if n := pendingCount(t, s); n != maxPendingAuthRequests {
+		t.Fatalf("pending overall = %d, want %d", n, maxPendingAuthRequests)
+	}
+}
+
+// The global /authorize bucket is a CPU circuit breaker: a few junk
+// sources, each spending its own budget and more, leave it far from empty.
+func TestJunkSourcesDoNotBlockTheOwnersAuthorize(t *testing.T) {
+	e := newTestEnvWith(t, func(o *Options) { o.TrustedProxies = []string{"127.0.0.0/8"} })
+	clientID := e.register(t, loopbackRedirect)
+	for src := 1; src <= 4; src++ {
+		for i := 0; i < 3*authorizePerIPBurst; i++ {
+			getFrom(t, e.browser, e.url+"/authorize", fmt.Sprintf("203.0.113.%d", src))
+		}
+	}
+	resp := getFrom(t, e.browser, e.authorizeURL(clientID, loopbackRedirect, newPKCE(), nil), "198.51.100.1")
+	if resp.StatusCode != http.StatusFound || !strings.HasPrefix(resp.Header.Get("Location"), e.url+"/login?id=") {
+		t.Fatalf("the owner's /authorize after 4 junk sources: %d", resp.StatusCode)
+	}
+}
+
+// A client metadata document hosted on the host of an allowlisted https
+// redirect (claude.ai, chatgpt.com, agent.meta.ai by default) has its own
+// first-fetch budget, so junk ids that drain the general one cannot keep
+// those apps from connecting.
+func TestAllowlistedHostCIMDHasItsOwnBudget(t *testing.T) {
+	f := &fakeFetch{}
+	r, _, _ := newTestResolver(t, f)
+	r.limit = rate.NewLimiter(0, 0) // the general budget, drained
+	id := "https://claude.ai/oauth/mcp-client.json"
+	f.body.Store(cimdBody(id, "Claude", "https://claude.ai/api/mcp/auth_callback"))
+	if _, err := r.resolve(withSource(context.Background(), netip.MustParseAddr("198.51.100.1")), id); err != nil {
+		t.Fatalf("allowlisted-host document with the general budget drained: %v", err)
+	}
+	if _, err := r.resolve(context.Background(), "https://evil.example.com/c.json"); !errors.Is(err, errCIMD) || f.calls.Load() != 1 {
+		t.Fatalf("a junk id was fetched from the drained general budget: calls %d, %v", f.calls.Load(), err)
+	}
+}
+
+// revoke and callback put the request's source in the context like token
+// does, so a client lookup that fetches a metadata document charges the
+// right source.
+func TestRevokeAndCallbackCarryTheSource(t *testing.T) {
+	var seen []netip.Addr
+	var mu sync.Mutex
+	fetch := func(ctx context.Context, id string) ([]byte, error) {
+		mu.Lock()
+		seen = append(seen, sourceFrom(ctx))
+		mu.Unlock()
+		return cimdBody(id, "Doc", loopbackRedirect), nil
+	}
+	e := newTestEnvWith(t, func(o *Options) { o.TrustedProxies = []string{"127.0.0.0/8"}; o.fetch = fetch })
+	stale := func() {
+		if _, err := e.svc.store.db.Exec(`UPDATE oauth_clients SET fetched = fetched - 7200 WHERE id = ?`, testCIMD); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := e.startAuthorize(t, e.browser, e.authorizeURL(testCIMD, loopbackRedirect, newPKCE(), nil))
+	if err := e.svc.store.completeAuthRequest(id, "otp"); err != nil {
+		t.Fatal(err)
+	}
+	stale()
+	_ = getFrom(t, e.browser, e.svc.login.callbackURL(id), "198.51.100.21")
+	stale()
+	req, _ := http.NewRequest(http.MethodPost, e.url+"/revoke", strings.NewReader(url.Values{"token": {"x"}, "client_id": {testCIMD}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-For", "198.51.100.22")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"198.51.100.21", "198.51.100.22"}
+	var got []string
+	for _, a := range seen[1:] { // seen[0] is the first fetch, from /authorize
+		got = append(got, a.String())
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("fetch sources after /authorize = %v, want %v", got, want)
 	}
 }
 

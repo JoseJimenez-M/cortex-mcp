@@ -64,9 +64,11 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
   (the source reaches the resolver through the request context, `withSource`) charge a per-source
   bucket (`ipLimiter`, LRU-bounded at `ipLimiterSize`, IPv6 per /64) before the global one. Passkey
   begin and finish charge only the per-source login bucket (`admitPasskey`): passkeys cannot be
-  guessed, and keeping them off the global bucket means TOTP guessing cannot block them;
-  `maxCeremonies` is sized from the `/authorize` budget and the pending cap instead
-  (`TestCeremonyCapExceedsTheLoginBudget`). The source is `trustedProxies.clientIP`: X-Forwarded-For is
+  guessed, and keeping them off the global bucket means TOTP guessing cannot block them; a full
+  ceremony map evicts its oldest entry. Pending auth requests are capped per source
+  (`auth_requests.source`, `maxPendingPerSource`) and globally from the fullest source
+  (`evictOverGlobalCap`); the global `/authorize` bucket only guards CPU. CIMD ids on an allowlisted
+  https redirect host have their own first-fetch budget (`appLimit`). The source is `trustedProxies.clientIP`: X-Forwarded-For is
   read only when the TCP peer is in config `trusted_proxies`, right-most untrusted entry first. Never
   key a limit on a header any other way.
 - **Logs name a CIMD client by host only** (`logClientID`): the rest of the URL is chosen by whoever

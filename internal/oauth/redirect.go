@@ -57,6 +57,24 @@ func parseAllowlist(entries []string) (allowlist, error) {
 	return a, nil
 }
 
+// httpsHosts returns the hosts of the https entries (exact and prefix),
+// such as claude.ai: the apps the operator chose to accept.
+func (a allowlist) httpsHosts() map[string]bool {
+	hosts := map[string]bool{}
+	add := func(e string) {
+		if u, err := url.Parse(e); err == nil && u.Scheme == "https" && u.Host != "" {
+			hosts[u.Host] = true
+		}
+	}
+	for e := range a.exact {
+		add(e)
+	}
+	for _, p := range a.prefixes {
+		add(p)
+	}
+	return hosts
+}
+
 // allows reports whether a client may use uri as a redirect URI. Entries
 // satisfy config.CheckRedirectEntry's character rules (lowercase host, no
 // trailing dot, no percent-encoding, no userinfo or fragment). Exact entries

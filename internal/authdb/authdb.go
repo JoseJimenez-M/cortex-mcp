@@ -144,7 +144,11 @@ var oauthSchema = []string{
 		fetched       INTEGER NOT NULL DEFAULT 0
 	)`,
 	// request is a JSON object with the validated authorize parameters;
-	// browser is the hash of the cookie that started the request.
+	// browser is the hash of the cookie that started the request; source is
+	// the rate-limit key of the address that sent it (an IPv4 /32 or IPv6
+	// /64 prefix, '' when unknown), which the pending caps count by. It is a
+	// column, not a field of request, because the caps group and order by it
+	// in SQL on every insert (the index below).
 	`CREATE TABLE auth_requests (
 		id        TEXT PRIMARY KEY,
 		client_id TEXT NOT NULL,
@@ -155,9 +159,12 @@ var oauthSchema = []string{
 		amr       TEXT NOT NULL DEFAULT '',
 		auth_time INTEGER NOT NULL DEFAULT 0,
 		done      INTEGER NOT NULL DEFAULT 0,
-		created   INTEGER NOT NULL
+		created   INTEGER NOT NULL,
+		source    TEXT NOT NULL DEFAULT ''
 	)`,
-	// Used codes stay until they expire so a replay can revoke the family.
+	`CREATE INDEX auth_requests_pending ON auth_requests(done, source, created)`,
+	// Used codes stay until authRequestTTL after issue, so a late replay can
+	// still revoke the family.
 	`CREATE TABLE auth_codes (
 		hash            BLOB PRIMARY KEY,
 		auth_request_id TEXT NOT NULL,
