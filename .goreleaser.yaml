@@ -1,0 +1,117 @@
+# GoReleaser configuration (schema version 2, GoReleaser v2.18.2).
+# .github/workflows/release.yml runs "goreleaser release --clean" on v* tags;
+# ci.yml runs "goreleaser check" and a snapshot on every pull request.
+# docs/releasing.md explains what a release contains and how to verify it.
+version: 2
+
+project_name: cortex-mcp
+
+builds:
+  - id: cortex-mcp
+    main: ./cmd/cortex-mcp
+    binary: cortex-mcp
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      # Not a release target (spec section 10); nothing tests it.
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/JoseJimenez-M/cortex-mcp/internal/server.Version=v{{ .Version }}
+    # File times come from the commit, so rebuilding a tag gives the same bytes.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: cortex-mcp
+    ids: [cortex-mcp]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - config.example.yaml
+      - docs/*.md
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# One SPDX SBOM per archive, from the binaries' embedded module list only
+# (no --enrich: no network lookups, the same input gives the same document).
+sboms:
+  - id: archives
+    artifacts: archive
+    args: ["$artifact", "--output", "spdx-json=$document"]
+
+# Keyless signature of the checksum file, which lists every archive and SBOM.
+# The certificate names this repository, release.yml, and the tag.
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--bundle=${signature}", "${artifact}", "--yes"]
+    output: true
+
+# Multi-arch image from the binaries above, built and pushed in one buildx
+# run during publish. Snapshots build one image per platform instead and load
+# them locally ("<tag>-amd64", "<tag>-arm64"). sbom attaches a BuildKit SBOM
+# attestation to the pushed index.
+dockers_v2:
+  - id: image
+    ids: [cortex-mcp]
+    dockerfile: Dockerfile
+    images:
+      - ghcr.io/josejimenez-m/cortex-mcp
+    tags:
+      - "{{ .Tag }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    extra_files:
+      - LICENSE
+    labels:
+      org.opencontainers.image.title: cortex-mcp
+      org.opencontainers.image.description: MCP server that lets AI assistants read and write one Markdown vault
+      org.opencontainers.image.source: https://github.com/JoseJimenez-M/cortex-mcp
+      org.opencontainers.image.licenses: PolyForm-Noncommercial-1.0.0
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+    annotations:
+      "index,manifest:org.opencontainers.image.description": MCP server that lets AI assistants read and write one Markdown vault
+      "index,manifest:org.opencontainers.image.source": https://github.com/JoseJimenez-M/cortex-mcp
+      "index,manifest:org.opencontainers.image.licenses": PolyForm-Noncommercial-1.0.0
+      "index:org.opencontainers.image.base.name": "{{ .BaseImage }}"
+      "index:org.opencontainers.image.base.digest": "{{ .BaseImageDigest }}"
+    sbom: "true"
+
+# Keyless signature of each pushed image, by digest.
+docker_signs:
+  - id: image
+    cmd: cosign
+    args: ["sign", "${artifact}@${digest}", "--yes"]
+    output: true
+
+release:
+  prerelease: auto
+  footer: |
+    Verify before installing: see docs/install.md, "Verifying a download". checksums.txt is signed
+    keylessly by this repository's release workflow (checksums.txt.sigstore.json), and the image
+    ghcr.io/josejimenez-m/cortex-mcp is signed by digest.
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "

@@ -42,3 +42,52 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0 && govulncheck ./...
       - name: gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0 && gosec ./...
+
+  # Exercises the release path before any tag exists: the workflows lint
+  # clean, the GoReleaser config is valid, and a full snapshot (every binary,
+  # archive, SBOM, and both images) builds. Nothing is signed or pushed.
+  release-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # GoReleaser derives the version from tags and history
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.54.0
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.18.2
+          install-only: true
+      - name: goreleaser check
+        run: goreleaser check
+      - name: goreleaser snapshot
+        run: goreleaser release --snapshot --clean --skip=publish,sign
+      - name: snapshot contents
+        run: |
+          test "$(find dist -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 5
+          test "$(find dist -maxdepth 1 -name '*.sbom.json' | wc -l)" -eq 5
+          test "$(grep -c '' dist/checksums.txt)" -eq 10
+      - name: snapshot binary reports its version
+        run: |
+          bin=$(find dist -type f -name cortex-mcp -path '*linux_amd64*')
+          out=$("$bin" version)
+          echo "$out"
+          case "$out" in "cortex-mcp v"*-SNAPSHOT-*) ;; *) echo "version not set by the linker"; exit 1 ;; esac
+      - name: snapshot image runs and carries the licence
+        run: |
+          img=$(docker image ls --format '{{.Repository}}:{{.Tag}}' ghcr.io/josejimenez-m/cortex-mcp | grep -- '-amd64$' | head -n 1)
+          test -n "$img"
+          docker run --rm "$img" version | grep -q '^cortex-mcp v'
+          test "$(docker image inspect "$img" --format '{{.Config.User}}')" = 65532
+          cid=$(docker create "$img")
+          docker cp "$cid:/LICENSE" - | tar -xO | head -n 1 | grep -q '^# PolyForm Noncommercial License 1.0.0$'
+          docker rm "$cid"
