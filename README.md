@@ -301,5 +301,9 @@ The design is in [`docs/specs/2026-10-01-cortex-mcp-design.md`](docs/specs/2026-
 
 ## Licence
 
-Source-available under PolyForm Noncommercial 1.0.0. Commercial use requires a license: contact
-jimenez331375@gmail.com. The `LICENSE` file itself is added in plan 3.
+Source-available under PolyForm Noncommercial 1.0.0. Commercial use (companies, paid services, resale, including modified versions) requires a separate licence: contact jimenez331375@gmail.com.
+
+The full terms are in [`LICENSE`](LICENSE). This is not an OSI open source licence: personal,
+research, hobby, and noncommercial organizational use is permitted, commercial use is not. Contributions
+are accepted under the contributor licence agreement in [`CONTRIBUTING.md`](CONTRIBUTING.md); security
+reports go to [`SECURITY.md`](SECURITY.md).
