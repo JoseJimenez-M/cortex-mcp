@@ -1,5 +1,6 @@
-// Package server wires the HTTP side: the MCP endpoint behind Bearer auth
-// and a per-client rate limit, plus a health check.
+// Package server wires the HTTP side: the MCP endpoint behind Bearer or
+// OAuth auth and a per-client rate limit, the OAuth routes, and a health
+// check.
 package server
 
 import (
@@ -19,6 +20,7 @@ import (
 
 	"github.com/JoseJimenez-M/cortex-mcp/internal/config"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/logs"
+	"github.com/JoseJimenez-M/cortex-mcp/internal/oauth"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/tokens"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/tools"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/vault"
@@ -68,6 +70,10 @@ type Options struct {
 	// Logger receives operational warnings and errors; nil means
 	// slog.Default().
 	Logger *slog.Logger
+	// OAuth is the authorization server; nil means oauth.enabled is false,
+	// which leaves exactly the Plan 1 surface (Bearer tokens only, no
+	// OAuth routes, no resource_metadata link).
+	OAuth *oauth.Service
 
 	idleTimeout time.Duration // tests only; zero means idleSessionTimeout
 }
@@ -94,9 +100,19 @@ func New(o Options) http.Handler {
 		SessionTimeout:             idle,
 		Logger:                     nil, // SDK logging stays off; nothing here may log request headers
 	})
-	requireToken := auth.RequireBearerToken(bearerVerifier(o.Tokens, o.Logger), &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})
-
 	mux := http.NewServeMux()
+	// Bearer tokens have no expiry; OAuth tokens carry one, which the SDK
+	// checks on top of our own lookup.
+	authOpts := &auth.RequireBearerTokenOptions{AllowMissingExpiration: true}
+	if o.OAuth != nil {
+		// The challenge tells MCP clients where to start OAuth (spec 4.1);
+		// Scopes makes the SDK answer 403 to a token without vault.
+		authOpts.ResourceMetadataURL = o.OAuth.ResourceMetadataURL()
+		authOpts.Scopes = []string{oauth.Scope}
+		o.OAuth.Register(mux)
+	}
+	requireToken := auth.RequireBearerToken(tokenVerifier(o), authOpts)
+
 	// Rate limit before the session cap, so refused session attempts still
 	// spend the client's budget.
 	mux.Handle("/mcp", noStore(requireToken(rateLimit(o.Config.Limits.RequestsPerMinute, sessions.limit(mcpHandler)))))
@@ -221,8 +237,9 @@ func (o Options) instructions() (string, error) {
 // bearerVerifier maps a secret to its token's identity. UserID is the token
 // row's id, never reused, so the SDK binds each session to the token that
 // opened it and a token re-created under a revoked name cannot reach the old
-// token's sessions. Extra["client"] is the plain name, for logs, attribution
-// and the rate limit. Malformed secrets are rejected inside tokens.Verify
+// token's sessions. Extra["client"] is the plain name, for logs and
+// attribution; Extra["ratekey"] is "bearer:" plus the name, so a token
+// re-created under the same name keeps the old budget. Malformed secrets are rejected inside tokens.Verify
 // before any database lookup, so junk requests are cheap. Store failures
 // return a fixed message: the SDK writes the error text into the response
 // body, which must not expose internals.
@@ -236,34 +253,74 @@ func bearerVerifier(store *tokens.Store, lg *slog.Logger) auth.TokenVerifier {
 			lg.Error("token store failure", "err", err)
 			return nil, errors.New("authentication unavailable")
 		}
-		return &auth.TokenInfo{UserID: id.ID, Extra: map[string]any{"client": id.Name}}, nil
+		return &auth.TokenInfo{UserID: id.ID, Scopes: []string{oauth.Scope},
+			Extra: map[string]any{"client": id.Name, rateKeyExtra: "bearer:" + id.Name}}, nil
 	}
 }
 
-// clientName is the authenticated client's token name, or "" when the request
-// carries no usable TokenInfo.
-func clientName(r *http.Request) string {
+// rateKeyExtra is the TokenInfo.Extra key the rate limiter reads. It is set
+// by the verifiers, never derived from the display name alone: OAuth client
+// names are chosen by whoever registers and need not be unique.
+const rateKeyExtra = "ratekey"
+
+// tokenVerifier routes a token by its shape: secrets from "token create"
+// start with cmcp_ (tokens.IsBearer) and only ever go to the Bearer store;
+// anything else is only ever an OAuth access token. UserID binds MCP
+// sessions: the Bearer row id, or "oauth:" plus the grant family, which
+// stays the same across refreshes. Extra["client"] is the token name or the
+// OAuth client name, for logs and write-log attribution. The rate limit key
+// of an OAuth token is its UserID (one budget per grant), so two clients
+// that registered under the same name never share a budget.
+func tokenVerifier(o Options) auth.TokenVerifier {
+	bearer := bearerVerifier(o.Tokens, o.Logger)
+	return func(ctx context.Context, token string, r *http.Request) (*auth.TokenInfo, error) {
+		if tokens.IsBearer(token) {
+			if !o.Config.BearerTokens || o.Tokens == nil {
+				return nil, auth.ErrInvalidToken
+			}
+			return bearer(ctx, token, r)
+		}
+		if o.OAuth == nil {
+			return nil, auth.ErrInvalidToken
+		}
+		id, err := o.OAuth.Verify(ctx, token)
+		if errors.Is(err, oauth.ErrInvalidToken) {
+			return nil, auth.ErrInvalidToken
+		}
+		if err != nil {
+			o.Logger.Error("oauth token store failure", "err", err)
+			return nil, errors.New("authentication unavailable")
+		}
+		return &auth.TokenInfo{UserID: id.UserID, Scopes: id.Scopes, Expiration: id.Expires,
+			Extra: map[string]any{"client": id.ClientName, rateKeyExtra: id.UserID}}, nil
+	}
+}
+
+// rateKey is the authenticated client's rate limit key, or "" when the
+// request carries no usable TokenInfo.
+func rateKey(r *http.Request) string {
 	ti := auth.TokenInfoFromContext(r.Context())
 	if ti == nil || ti.UserID == "" {
 		return ""
 	}
-	name, _ := ti.Extra["client"].(string)
-	return name
+	key, _ := ti.Extra[rateKeyExtra].(string)
+	return key
 }
 
 // rateLimit allows perMinute requests per authenticated client, with a burst
 // of a sixth of that (10 at the default 60), enough for an MCP handshake plus
 // a call. It runs after auth, so unauthenticated traffic never creates a
-// limiter: the map is keyed by token name (so a token re-created under the
-// same name keeps the old budget) and bounded by the number of names ever
-// issued (a handful), with no eviction needed. If tokens ever become
-// self-service, add eviction here.
+// limiter: the map is keyed by Extra["ratekey"], the Bearer token name (so a
+// token re-created under the same name keeps the old budget) or the OAuth
+// grant family. It is bounded by the names ever issued plus the grants ever
+// approved, and every grant needs the owner's login, so no eviction is
+// needed. If tokens or grants ever become self-service, add eviction here.
 func rateLimit(perMinute int, next http.Handler) http.Handler {
 	var mu sync.Mutex
 	limiters := map[string]*rate.Limiter{}
 	burst := max(1, perMinute/6)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		name := clientName(r)
+		name := rateKey(r)
 		if name == "" { // unreachable behind requireToken; fail closed
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
