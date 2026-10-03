@@ -175,7 +175,8 @@ Single owner, created only from the console with `cortex-mcp setup`, never from 
 registers:
 
 - a **passkey** (WebAuthn; any authenticator, including password-manager passkeys),
-- a **TOTP** secret as fallback (shown as a QR once),
+- a **TOTP** secret as fallback (RFC 6238, standard library only; shown once as an `otpauth://` URI to
+  paste into an authenticator app, no QR dependency; a used time step is never accepted twice),
 - ten single-use **recovery codes** (shown once, stored hashed).
 
 The documentation recommends keeping the three factors in different places (for example the passkey
@@ -184,19 +185,50 @@ never locks the owner out. `cortex-mcp reset-auth` on the host is the last resor
 access.
 
 ### 6.2 OAuth 2.1 for assistant apps
-The server is its own authorization server (one less service to run):
+The server is its own authorization server (one less service to run), built on
+`github.com/zitadel/oidc/v3` (`op` package) for the protocol core: chosen on 2026-10-02 by the owner for
+being a maintained, widely reviewed library rather than hand-written protocol code. fosite was rejected
+(standalone release train frozen; the maintained copy lives inside Hydra), luikyv/go-oidc was the
+fallback (OP-certified, but a single maintainer and a v0.x API). Passkeys use
+`github.com/go-webauthn/webauthn`. Target: the MCP authorization spec revision 2025-11-25.
 
-- Authorization server and protected-resource metadata endpoints.
-- Dynamic client registration, so an app can register itself on first connect.
-- Authorization code flow with mandatory PKCE (S256). No implicit flow, no password grant.
-- Login (passkey, or TOTP) then a consent screen naming the client.
-- Access tokens valid 1 hour; refresh tokens valid 30 days and rotated on use.
-- Tokens are opaque random values; only hashes are stored.
+Everything is served on the MCP origin (`public_url`), because clients such as claude.ai only read the
+first `authorization_servers` entry:
+
+- **Protected resource metadata** (RFC 9728) at `/.well-known/oauth-protected-resource` and the
+  path-specific variant; `resource` is exactly the MCP endpoint URL. Unauthenticated `/mcp` requests
+  get `401` with `WWW-Authenticate: Bearer resource_metadata="...", scope="vault"`.
+- **Authorization server metadata** (RFC 8414) at `/.well-known/oauth-authorization-server` (and
+  `openid-configuration` for clients that only try OIDC discovery), advertising
+  `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]`,
+  `registration_endpoint`, `client_id_metadata_document_supported: true`,
+  `authorization_response_iss_parameter_supported: true`, scopes `vault` and `offline_access`.
+- **The library serves** `/authorize`, `/authorize/callback`, `/oauth/token`, `/revoke`, `/keys`
+  (only because it always mints an ID token: one EdDSA/ES256 key in the auth state).
+- **Our code adds**, each with tests: S256-only PKCE (`plain` and missing challenges rejected, since
+  the library accepts `plain` by default); RFC 8707 `resource` on authorize and token requests, bound
+  as the token audience and checked on every MCP request; the RFC 9207 `iss` parameter on every
+  authorization response; refresh token rotation with reuse detection that revokes the whole token
+  family (RFC 9700); `/register` (RFC 7591) and Client ID Metadata Documents (fetched over HTTPS with
+  SSRF guards, size and time limits, cached), both restricted to a **redirect allowlist** in the config
+  (defaults: `https://claude.ai/api/mcp/auth_callback`, `https://chatgpt.com/connector_platform_oauth_redirect`,
+  `https://chatgpt.com/connector/oauth/` prefix, `https://agent.meta.ai/api/hatch/oauth/callback`, and
+  loopback for native clients such as Claude Code); exact redirect matching except loopback ports.
+- **Login and consent pages** (passkey first, TOTP or a recovery code as fallback) bound to the
+  browser that started the request: unguessable request ids, a per-request CSRF token, a session
+  cookie (`Secure`, `HttpOnly`, `SameSite=Lax`), `frame-ancestors 'none'`, and a rate limit on login
+  attempts. The consent page names the client and shows its redirect host.
+- **Tokens:** access tokens valid 1 hour, refresh tokens 30 days, rotated on use; the resource server
+  always looks the token up in storage and never trusts a decrypted payload alone (the library's
+  opaque format had a forgery advisory, GHSA-j8gq-92xf-382c, fixed in v3.47.0). One scope, `vault`,
+  grants the 12 tools; finer scopes are a future option.
+- The library version is pinned; the resource-indicator and `iss` glue touches library extension
+  points, so a library bump must re-run the OAuth conformance tests.
 
 ### 6.3 Bearer tokens (optional)
 For clients that cannot run a browser login (a CLI agent, scripts, cron). Created with
 `cortex-mcp token create <name>`, shown once, stored as a hash, revocable. Disabled entirely with
-`bearer_tokens: false`. Each token row has a random id that is never reused, and MCP sessions are bound
+`bearer_tokens: false` (possible only once OAuth is configured). Each token row has a random id that is never reused, and MCP sessions are bound
 to that id rather than to the name: a token re-created under a revoked name cannot reach the old
 token's sessions. The name stays the client label in logs and the rate limit key.
 
