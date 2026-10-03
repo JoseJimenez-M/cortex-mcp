@@ -29,6 +29,8 @@ is missing, search for it (`grep -rn`), never assume. The design source of truth
 | The login page, passkeys, TOTP | `internal/oauth/login.go`, `internal/oauth/webauthn.go` | spec section 6.1 |
 | OAuth client registration, CIMD, redirect allowlist | `internal/oauth/dcr.go`, `cimd.go`, `redirect.go` | spec section 6.2 |
 | Commands and flags | `internal/cli/cli.go` | `README.md` |
+| Releases, CI workflows, the container image | `docs/releasing.md` | `.goreleaser.yaml`, `.github/workflows/`, `Dockerfile`, spec section 10 |
+| User docs (install, configuration, clients, security) | the guide in `docs/` for the topic | `README.md`; keep them generic: no real domain, IP, or path |
 | Executing planned work | the current file in `docs/plans/` | the spec sections it cites |
 
 ## Architecture and dependency rule
@@ -83,6 +85,8 @@ A change that needs to bend one of these is a design change: stop and ask the ow
 - `bin/`, `dist/`, `coverage.out`: build output, git-ignored.
 - `docs/specs/`: the approved design. Change it only to record a decision the owner made, and say so in
   the commit message.
+- `LICENSE`: the PolyForm Noncommercial 1.0.0 text byte for byte plus the `Required Notice:` line. Never
+  edit it; `docs/releasing.md` records its sha256.
 - `.git/`.
 
 ## Dependencies
@@ -102,6 +106,12 @@ last `getServer` call is the server a new session connects to, and the initializ
 
 Bumping `github.com/zitadel/oidc/v3` must re-run `go test -race ./internal/oauth ./internal/server`
 and re-check the library behaviours listed in `internal/oauth/AGENTS.md`.
+
+Release tooling is not a Go dependency and is pinned where it runs: GitHub Actions by commit SHA,
+GoReleaser (v2.18.2) and syft (v1.54.0) by exact version in `.github/workflows/ci.yml` and
+`release.yml`, and the base image by digest in `Dockerfile`. Dependabot bumps the actions, the Go
+modules, and the base image; GoReleaser and syft are bumped by hand in both workflows
+(`docs/releasing.md`, "Maintenance").
 
 ## Workflow
 
