@@ -14,6 +14,11 @@ import (
 // keys with strings.EqualFold and walks the form map in random order, so
 // "REDIRECT_URI" could override the "redirect_uri" our checks looked at.
 // canonicalForm hands the library only these exact keys.
+const (
+	maxStateBytes = 2048
+	maxNonceBytes = 512
+)
+
 var (
 	authorizeParams = []string{"client_id", "redirect_uri", "response_type", "response_mode", "scope", "state",
 		"nonce", "prompt", "code_challenge", "code_challenge_method", "resource"}
@@ -65,6 +70,12 @@ func canonicalForm(r *http.Request, known []string) bool {
 // allowlist first means no response of any kind is ever redirected to a
 // URI the allowlist refuses. The messages are fixed text.
 func (s *Service) preCheck(r *http.Request) (string, bool) {
+	// state and nonce are stored with the request and echoed back; the
+	// bounds keep a flood of requests from writing large rows. Clients send
+	// a few dozen bytes.
+	if len(r.Form.Get("state")) > maxStateBytes || len(r.Form.Get("nonce")) > maxNonceBytes {
+		return "invalid_request: state or nonce is too long", false
+	}
 	if r.Form.Get("response_type") != string(oidc.ResponseTypeCode) {
 		return "unsupported response_type: only code is supported", false
 	}

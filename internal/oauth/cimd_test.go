@@ -218,11 +218,13 @@ func TestResolverRejectsBadDocumentsAndURLs(t *testing.T) {
 func TestResolverFetchesAreRateLimited(t *testing.T) {
 	f := &fakeFetch{err: errors.New("unreachable")}
 	r, _, _ := newTestResolver(t, f)
+	// Each from its own source, so only the global bucket limits them.
 	for i := 0; i < 12; i++ {
-		_, _ = r.resolve(context.Background(), "https://app.example.com/c"+strings.Repeat("x", i)+".json")
+		ctx := withSource(context.Background(), netip.AddrFrom4([4]byte{203, 0, 113, byte(i)}))
+		_, _ = r.resolve(ctx, "https://app.example.com/c"+strings.Repeat("x", i)+".json")
 	}
-	if n := f.calls.Load(); n != 10 {
-		t.Fatalf("%d fetches, want 10 (the burst)", n)
+	if n := f.calls.Load(); n != cimdGlobalBurst {
+		t.Fatalf("%d fetches, want %d (the global burst)", n, cimdGlobalBurst)
 	}
 }
 
@@ -247,7 +249,7 @@ func TestResolverCachesFailuresBriefly(t *testing.T) {
 func TestResolverFailureCacheIsBounded(t *testing.T) {
 	f := &fakeFetch{err: errors.New("unreachable")}
 	r, _, _ := newTestResolver(t, f)
-	r.limit = rate.NewLimiter(rate.Inf, 1)
+	r.limit, r.perIP = rate.NewLimiter(rate.Inf, 1), newIPLimiter(0, 1, ipLimiterSize)
 	for i := 0; i < cimdMaxFailures+50; i++ {
 		_, _ = r.resolve(context.Background(), "https://app.example.com/c"+strconv.Itoa(i)+".json")
 	}
@@ -262,7 +264,7 @@ func TestResolverFailureCacheIsBounded(t *testing.T) {
 func TestResolverBoundsStoredDocuments(t *testing.T) {
 	f := &fakeFetch{}
 	r, s, clk := newTestResolver(t, f)
-	r.limit = rate.NewLimiter(rate.Inf, 1)
+	r.limit, r.perIP = rate.NewLimiter(rate.Inf, 1), newIPLimiter(0, 1, ipLimiterSize)
 	r.maxStored = 3
 	for i := 0; i < 5; i++ {
 		id := "https://app.example.com/c" + strconv.Itoa(i) + ".json"

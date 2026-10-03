@@ -71,6 +71,17 @@ func (s *Store) tx(fn func(*sql.Tx) error) error {
 	return nil
 }
 
+// rowExists runs a query that selects at most one row, outside any
+// transaction.
+func (s *Store) rowExists(query string, args ...any) (bool, error) {
+	var one int
+	err := s.db.QueryRow(query, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // hashToken is how every stored secret is kept: all of them carry at least
 // 80 bits of entropy, so a fast hash leaks nothing useful.
 func hashToken(s string) []byte {

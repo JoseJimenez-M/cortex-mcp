@@ -18,8 +18,16 @@ import (
 )
 
 const (
-	ceremonyTTL        = 5 * time.Minute
-	maxCeremonies      = 64
+	ceremonyTTL = 5 * time.Minute
+	// maxCeremonies bounds the open WebAuthn challenges. Passkey begins are
+	// charged to the source only (loginPages.admitPasskey), so the bound
+	// comes from what a begin needs: a login ceremony is keyed by a live
+	// auth request, and auth requests are created only through /authorize,
+	// whose global limiter and pending cap bound how many distinct ones can
+	// be begun within one ceremonyTTL (TestCeremonyCapExceedsTheLoginBudget);
+	// a registration ceremony needs an enrollment link, which only the owner
+	// has. About 300 bytes each.
+	maxCeremonies      = 1024
 	maxCredentialBytes = 64 << 10
 	maxEnrollBodyBytes = 4 << 10
 
@@ -155,8 +163,8 @@ func newCeremonies(now func() time.Time) *ceremonies {
 
 // put stores a ceremony, replacing one under the same key (a login button
 // pressed twice); false when maxCeremonies others are already open, which
-// bounds memory against a flood of begin requests. Begins are charged to
-// the login limiter, whose budget over ceremonyTTL stays below the cap.
+// bounds memory against a flood of begin requests (see maxCeremonies for
+// why admitted begins alone cannot reach the cap).
 func (c *ceremonies) put(key string, d *webauthn.SessionData) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -226,16 +234,16 @@ func refuseTooMany(w http.ResponseWriter, d time.Duration) {
 }
 
 // beginLogin is POST /login/passkey/begin?id=... with the CSRF token in the
-// csrfHeader header. Each begin is one login attempt for the limiter: a
-// finish needs a ceremony from a begin and each ceremony is answered once,
-// so charging begin bounds both the attempts and the open ceremonies.
+// csrfHeader header. Begin and finish are each charged to the source's
+// bucket (admitPasskey), never to the global login bucket: a passkey cannot
+// be guessed, so the global budget only has to bound guessable codes.
 func (p *passkeys) beginLogin(w http.ResponseWriter, r *http.Request) {
 	a, err := p.login.pendingWithCSRF(r, r.URL.Query().Get("id"), r.Header.Get(csrfHeader))
 	if err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "sign-in request not valid in this browser")
 		return
 	}
-	if d, ok := p.login.admit(r); !ok {
+	if d, ok := p.login.admitPasskey(r); !ok {
 		refuseTooMany(w, d)
 		return
 	}
@@ -264,6 +272,12 @@ func (p *passkeys) finishLogin(w http.ResponseWriter, r *http.Request) {
 	a, err := p.login.pendingWithCSRF(r, r.URL.Query().Get("id"), r.Header.Get(csrfHeader))
 	if err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "sign-in request not valid in this browser")
+		return
+	}
+	// Charged before the ceremony is taken, so a refused finish leaves it
+	// open for a retry.
+	if d, ok := p.login.admitPasskey(r); !ok {
+		refuseTooMany(w, d)
 		return
 	}
 	sess, ok := p.cer.take("login:" + a.ID)
@@ -335,14 +349,12 @@ func (p *passkeys) finishLogin(w http.ResponseWriter, r *http.Request) {
 func (p *passkeys) enrollPage(w http.ResponseWriter, _ *http.Request) { renderEnroll(w) }
 
 // beginEnroll is POST /enroll/begin with {"token", "code"}. The token is
-// looked up before the TOTP code, so a request without a live link never
-// counts a TOTP failure and a wrong code never burns the link; the link is
-// then consumed by startEnrollment, which is the gate.
+// looked up first (a cheap check of a 256-bit secret), so a request without
+// a live link is refused before any rate-limit bucket is charged and never
+// counts a TOTP failure. Only then is the TOTP check charged like a login
+// attempt (admit), and a wrong code never burns the link; the link is
+// consumed by startEnrollment, which is the gate.
 func (p *passkeys) beginEnroll(w http.ResponseWriter, r *http.Request) {
-	if d, ok := p.login.admit(r); !ok {
-		refuseTooMany(w, d)
-		return
-	}
 	var in struct {
 		Token string `json:"token"`
 		Code  string `json:"code"`
@@ -358,6 +370,10 @@ func (p *passkeys) beginEnroll(w http.ResponseWriter, r *http.Request) {
 	expired := "this enrollment link is not valid or has expired; run cortex-mcp setup -passkey for a new one"
 	if ok, err := p.store.enrollmentValid(in.Token); err != nil || !ok {
 		oauthError(w, http.StatusBadRequest, "invalid_request", expired)
+		return
+	}
+	if d, ok := p.login.admit(r); !ok {
+		refuseTooMany(w, d)
 		return
 	}
 	if err := p.store.verifyTOTP(in.Code); err != nil {

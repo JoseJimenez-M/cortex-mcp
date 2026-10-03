@@ -50,14 +50,20 @@ func newLoginPages(store *Store, base string, logger *slog.Logger) *loginPages {
 	}
 }
 
-// admit charges one login attempt: the source's bucket first, then the
-// global one, so a source the per-source bucket refuses never draws on the
-// global budget. Every factor goes through it.
+// admit charges one attempt at a guessable factor (a TOTP or recovery code,
+// or the TOTP check of /enroll/begin): the source's bucket, then the global
+// one (admitSource).
 func (l *loginPages) admit(r *http.Request) (time.Duration, bool) {
-	if d, ok := l.perIP.allow(l.proxies.clientIP(r)); !ok {
-		return d, false
-	}
-	return reserveNow(l.limit)
+	return admitSource(l.perIP, l.limit, l.proxies.clientIP(r))
+}
+
+// admitPasskey charges a passkey ceremony step to the source's bucket only.
+// A passkey cannot be guessed, so these steps need no global budget, and
+// keeping them off it means sources that spend the global code budget
+// (TOTP guesses) cannot keep the owner from approving with a passkey. The
+// ceremonies they open are bounded by maxCeremonies (webauthn.go).
+func (l *loginPages) admitPasskey(r *http.Request) (time.Duration, bool) {
+	return l.perIP.allow(l.proxies.clientIP(r))
 }
 
 func (l *loginPages) callbackURL(id string) string {

@@ -531,6 +531,7 @@ func TestNewRejectsBadOptions(t *testing.T) {
 // these before the library runs, so no error is ever redirected to them.
 func TestLooseLoopbackRedirectsAreNeverRedirected(t *testing.T) {
 	e := newTestEnv(t)
+	e.unlimitAuthorize()
 	clientID := e.register(t, loopbackRedirect)
 	for _, redirect := range []string{
 		"http://evil.com@127.0.0.1/callback",
@@ -633,6 +634,7 @@ func refusedWithoutRedirect(t *testing.T, name string, resp *http.Response) {
 // cover the map orders.
 func TestCaseVariantAndRepeatedParametersRefused(t *testing.T) {
 	e := newTestEnv(t)
+	e.unlimitAuthorize()
 	clientID := e.register(t, loopbackRedirect)
 	other := e.register(t, "http://localhost/other")
 	evil := "http://evil.com@127.0.0.1/callback"
@@ -657,21 +659,23 @@ func TestCaseVariantAndRepeatedParametersRefused(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			refusedWithoutRedirect(t, name+" GET", resp)
-			resp, err = e.browser.PostForm(e.url+"/authorize", q)
-			if err != nil {
-				t.Fatal(err)
-			}
-			refusedWithoutRedirect(t, name+" POST", resp)
+			refusedWithoutRedirect(t, name, resp)
 		}
 	}
-	// A parameter split between the query and the body is a repeat too.
-	q, _ := url.ParseQuery(strings.SplitN(e.authorizeURL(clientID, loopbackRedirect, newPKCE(), nil), "?", 2)[1])
-	resp, err := e.browser.PostForm(e.url+"/authorize?redirect_uri="+url.QueryEscape(evil), q)
+	// /authorize is GET only (TestAuthorizeIsGetOnly); on the token
+	// endpoint a parameter split between the query and the body is a
+	// repeat too.
+	p := newPKCE()
+	code := e.approvedCode(t, clientID, p)
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {loopbackRedirect},
+		"client_id": {clientID}, "code_verifier": {p.verifier}}
+	resp, err := http.PostForm(e.url+"/oauth/token?redirect_uri="+url.QueryEscape(evil), form)
 	if err != nil {
 		t.Fatal(err)
 	}
-	refusedWithoutRedirect(t, "query and body", resp)
+	if out := decodeJSON(t, resp); resp.StatusCode != http.StatusBadRequest || out["error"] != "invalid_request" {
+		t.Fatalf("token request split between query and body: %d %v", resp.StatusCode, out["error"])
+	}
 	// Unrelated unknown parameters are dropped, not refused: a request
 	// object the library would otherwise act on is simply ignored.
 	e.startAuthorize(t, e.browser, e.authorizeURL(clientID, loopbackRedirect, newPKCE(), url.Values{"request": {"x"}, "foo": {"bar"}}))

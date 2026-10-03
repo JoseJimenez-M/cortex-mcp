@@ -90,13 +90,9 @@ func newRegistrar(store *Store, allow allowlist) *registrar {
 	}
 }
 
-// admit charges the source's bucket, then the global one. A request the
-// source bucket refuses never reaches the global bucket.
+// admit charges the source's bucket, then the global one (admitSource).
 func (g *registrar) admit(r *http.Request) (time.Duration, bool) {
-	if d, ok := g.perIP.allow(g.proxies.clientIP(r)); !ok {
-		return d, false
-	}
-	return reserveNow(g.limit)
+	return admitSource(g.perIP, g.limit, g.proxies.clientIP(r))
 }
 
 func (g *registrar) ServeHTTP(w http.ResponseWriter, r *http.Request) {

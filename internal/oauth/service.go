@@ -18,11 +18,24 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"github.com/zitadel/oidc/v3/pkg/op"
+	"golang.org/x/time/rate"
 )
 
 const (
 	maxFormBytes        = 64 << 10
 	maxAccessTokenBytes = 4096
+
+	// /authorize is unauthenticated and every request may write a row or
+	// trigger a metadata fetch. A source gets authorizePerIPBurst requests,
+	// then one every authorizePerIPEvery (20 a minute); all sources together
+	// get authorizeGlobalBurst, then one a second. The owner's flows need a
+	// handful each, and three or more sources are needed to keep the global
+	// bucket empty.
+	authorizePerIPBurst  = 20
+	authorizePerIPEvery  = 3 * time.Second
+	authorizeGlobalBurst = 60
+	authorizeGlobalEvery = time.Second
+
 	// browserCookie binds an authorization to the browser that started it.
 	// __Host- makes browsers refuse it unless it is Secure, host-only, and
 	// Path=/. Browsers (and Go's cookie jar) treat localhost as secure.
@@ -69,6 +82,10 @@ type Service struct {
 	op       *opStorage
 	allow    allowlist
 	logger   *slog.Logger
+	proxies  trustedProxies
+
+	authorizeLimit  *ipLimiter    // per source, in front of authorizeGlobal
+	authorizeGlobal *rate.Limiter // every /authorize request
 }
 
 // New builds the service: keys are loaded (or created) from the database,
@@ -108,6 +125,10 @@ func New(o Options) (*Service, error) {
 		reg:    newRegistrar(store, allow),
 		allow:  allow,
 		logger: o.Logger,
+
+		proxies:         proxies,
+		authorizeLimit:  newIPLimiter(authorizePerIPEvery, authorizePerIPBurst, ipLimiterSize),
+		authorizeGlobal: rate.NewLimiter(rate.Every(authorizeGlobalEvery), authorizeGlobalBurst),
 	}
 	s.reg.proxies = proxies
 	s.login = newLoginPages(store, base, o.Logger)
@@ -162,7 +183,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 	handle("GET /.well-known/oauth-protected-resource/mcp", prm)
 	handle("GET /.well-known/oauth-authorization-server", asm)
 	handle("GET /.well-known/openid-configuration", asm)
-	handle("/authorize", http.HandlerFunc(s.authorize))
+	handle("/authorize", http.HandlerFunc(s.authorize)) // GET only; the handler answers 405 itself, with secureHeaders
 	handle("GET /authorize/callback", http.HandlerFunc(s.callback))
 	handle("POST /oauth/token", http.HandlerFunc(s.token))
 	handle("POST /revoke", http.HandlerFunc(s.revoke))
@@ -257,13 +278,25 @@ func (s *Service) resourceOK(vals []string) bool {
 
 // authorize wraps the library's /authorize. Refusals here are plain 400
 // pages, never redirects: the redirect URI has not been validated yet.
+//
+// Only GET is served. Each authorization sets the browser cookie, keeping
+// the value the browser sent (browserID). A cross-site POST, which any page
+// the owner visits can submit, arrives without the SameSite=Lax cookie, so
+// it would get a fresh value and overwrite the owner's binding mid-login.
+// A cross-site top-level GET carries the cookie, so it keeps the binding.
 func (s *Service) authorize(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		w.Header().Set("Allow", "GET, POST")
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
+	src := s.proxies.clientIP(r)
+	if d, ok := admitSource(s.authorizeLimit, s.authorizeGlobal, src); !ok {
+		w.Header().Set("Retry-After", retryAfter(d))
+		http.Error(w, "Too many sign-in requests. Wait a minute and start the connection again from the assistant.", http.StatusTooManyRequests)
+		return
+	}
+	r = r.WithContext(withSource(r.Context(), src))
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid authorization request", http.StatusBadRequest)
 		return
@@ -329,6 +362,7 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 // token wraps /oauth/token: only the two grants this server issues, and
 // the resource indicator if present.
 func (s *Service) token(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withSource(r.Context(), s.proxies.clientIP(r)))
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "the request body is not a valid form")

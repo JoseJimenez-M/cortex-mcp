@@ -113,6 +113,14 @@ func (s *Store) refreshByToken(token string) (*refreshRequest, error) {
 	if !wellFormedRefresh(token) {
 		return nil, errInvalidRefresh
 	}
+	// As in authRequestByCode: an unknown token is refused with a read,
+	// without taking the write lock.
+	if exists, err := s.rowExists(`SELECT 1 FROM refresh_tokens WHERE hash = ?`, hashToken(token)); err != nil || !exists {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errInvalidRefresh
+	}
 	var r *refreshRequest
 	err := s.tx(func(tx *sql.Tx) error {
 		var family, clientID, scopes, amr string

@@ -16,6 +16,14 @@ const (
 	refreshTTL      = 30 * 24 * time.Hour
 	unusedClientTTL = 24 * time.Hour // a client that never completed a grant
 	sweepEvery      = time.Minute
+
+	// Pending (not yet approved) authorization requests are capped, since
+	// /authorize is unauthenticated: beyond maxPendingPerClient for one
+	// client, or maxPendingAuthRequests overall, the oldest pending ones are
+	// deleted. An approved request (done = 1) is never evicted: only the
+	// owner can produce one, and its code is about to be exchanged.
+	maxPendingPerClient    = 20
+	maxPendingAuthRequests = 200
 	// ownerSubject is the sub of every token: there is one owner.
 	ownerSubject = "owner"
 )
@@ -105,18 +113,28 @@ func (s *Store) createAuthRequest(a *authRequest) error {
 	if err != nil {
 		return err
 	}
-	// The client row must still exist: a CIMD revocation can delete it
-	// between the library's lookup and this insert.
-	res, err := s.db.Exec(`INSERT INTO auth_requests(id, client_id, request, browser, csrf, family, created)
-		SELECT ?, id, ?, ?, ?, ?, ? FROM oauth_clients WHERE id = ?`,
-		a.ID, string(p), a.Browser, a.CSRF, a.Family, a.Created.Unix(), a.ClientID)
-	if err != nil {
+	return s.tx(func(tx *sql.Tx) error {
+		// The client row must still exist: a CIMD revocation can delete it
+		// between the library's lookup and this insert.
+		res, err := tx.Exec(`INSERT INTO auth_requests(id, client_id, request, browser, csrf, family, created)
+			SELECT ?, id, ?, ?, ?, ?, ? FROM oauth_clients WHERE id = ?`,
+			a.ID, string(p), a.Browser, a.CSRF, a.Family, a.Created.Unix(), a.ClientID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return ErrNotFound
+		}
+		// Newest first (rowid breaks ties within a second); everything past
+		// the cap goes. The new row is the newest, so it always stays.
+		if _, err := tx.Exec(`DELETE FROM auth_requests WHERE rowid IN (SELECT rowid FROM auth_requests
+			WHERE done = 0 AND client_id = ? ORDER BY created DESC, rowid DESC LIMIT -1 OFFSET ?)`, a.ClientID, maxPendingPerClient); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`DELETE FROM auth_requests WHERE rowid IN (SELECT rowid FROM auth_requests
+			WHERE done = 0 ORDER BY created DESC, rowid DESC LIMIT -1 OFFSET ?)`, maxPendingAuthRequests)
 		return err
-	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		return ErrNotFound
-	}
-	return nil
+	})
 }
 
 // authRequest loads a request younger than authRequestTTL, pending or
@@ -184,6 +202,16 @@ func (s *Store) authRequestByCode(code string) (*authRequest, error) {
 		return nil, errInvalidCode
 	}
 	h := hashToken(code)
+	// A plain read first: a code that matches no row (junk, or one swept
+	// away) is refused without waiting for the write lock, which every
+	// transaction takes at BEGIN (_txlock=immediate). The transaction below
+	// reads the row again, so nothing is decided on this read alone.
+	if exists, err := s.rowExists(`SELECT 1 FROM auth_codes WHERE hash = ?`, h); err != nil || !exists {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errInvalidCode
+	}
 	var a *authRequest
 	err := s.tx(func(tx *sql.Tx) error {
 		var reqID, family string

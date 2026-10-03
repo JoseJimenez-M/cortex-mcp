@@ -394,6 +394,7 @@ func TestEnrollmentLinkIsSingleUseUnderRace(t *testing.T) {
 
 func TestPasskeyLoginRefusals(t *testing.T) {
 	e := newTestEnv(t)
+	e.unlimitLogin()
 	sec := e.setupOwner(t)
 	clientID := e.register(t, loopbackRedirect)
 	id, csrf := e.pendingPasskeyLogin(t, clientID)
@@ -476,8 +477,9 @@ func TestPasskeyCSRFTokenIsNeverReadFromTheURL(t *testing.T) {
 	}
 }
 
-// Passkey logins charge the same per-source then global limiter as codes:
-// attempts on /login and passkey ceremonies draw on one budget.
+// Passkey ceremonies charge the same per-source bucket as codes: attempts
+// on /login and passkey steps from one source draw on one budget (passkeys
+// skip only the global bucket).
 func TestPasskeyLoginSharesTheLoginRateLimit(t *testing.T) {
 	e := newTestEnv(t)
 	sec := e.setupOwner(t)
@@ -492,7 +494,13 @@ func TestPasskeyLoginSharesTheLoginRateLimit(t *testing.T) {
 	if status != http.StatusTooManyRequests || h.Get("Retry-After") == "" {
 		t.Fatalf("passkey begin past the per-source burst: %d %v", status, out)
 	}
-	in, _ := json.Marshal(map[string]string{"token": "any", "code": "123456"})
+	// /enroll/begin with a live link is charged too (a junk one is not:
+	// TestJunkEnrollBeginIsFree).
+	token, _, err := e.svc.store.NewEnrollment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, _ := json.Marshal(map[string]string{"token": token, "code": "123456"})
 	if status, _ := postJSON(t, http.DefaultClient, e.url+"/enroll/begin", in); status != http.StatusTooManyRequests {
 		t.Fatalf("enroll begin past the per-source burst: %d", status)
 	}
@@ -559,6 +567,7 @@ func TestPasskeysRequireUserVerification(t *testing.T) {
 // The origin in the client data must be public_url's origin exactly.
 func TestPasskeyOriginMustMatchExactly(t *testing.T) {
 	e := newTestEnv(t)
+	e.unlimitLogin()
 	sec := e.setupOwner(t)
 	k := newSoftKey(t, e.url)
 	e.enroll(t, k, sec.EnrollToken)
@@ -718,11 +727,15 @@ func TestPasskeyForeignUserHandleIsRefused(t *testing.T) {
 	}
 }
 
-// The login limiter's budget over one ceremony lifetime stays below the
-// ceremony cap, so admitted begins alone can never fill the map.
+// Admitted begins alone can never fill the ceremony map. A login ceremony
+// is keyed by a live auth request, so within one ceremonyTTL at most the
+// requests pending at its start plus those /authorize admits during it can
+// hold one; registration ceremonies need an enrollment link (the owner's),
+// and get the rest of the room.
 func TestCeremonyCapExceedsTheLoginBudget(t *testing.T) {
-	if budget := loginGlobalBurst + int(ceremonyTTL/loginGlobalEvery); budget >= maxCeremonies {
-		t.Fatalf("login budget per ceremonyTTL = %d, maxCeremonies = %d", budget, maxCeremonies)
+	loginKeys := maxPendingAuthRequests + authorizeGlobalBurst + int(ceremonyTTL/authorizeGlobalEvery)
+	if room := maxCeremonies - loginKeys; room < 64 {
+		t.Fatalf("login ceremonies per ceremonyTTL can reach %d of maxCeremonies %d: %d left for enrollment", loginKeys, maxCeremonies, room)
 	}
 }
 

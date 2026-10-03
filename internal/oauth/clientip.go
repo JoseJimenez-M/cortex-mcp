@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"container/list"
+	"context"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -84,6 +85,22 @@ func (p trustedProxies) clientIP(r *http.Request) netip.Addr {
 	return peer
 }
 
+// sourceCtxKey is the context key under which Service puts the request's
+// source address (clientIP), for limits charged below the HTTP layer (the
+// CIMD first-fetch budget, reached through the library's client lookup).
+type sourceCtxKey struct{}
+
+func withSource(ctx context.Context, a netip.Addr) context.Context {
+	return context.WithValue(ctx, sourceCtxKey{}, a)
+}
+
+// sourceFrom returns the source put there by withSource, or the zero
+// address (one shared bucket) when there is none.
+func sourceFrom(ctx context.Context) netip.Addr {
+	a, _ := ctx.Value(sourceCtxKey{}).(netip.Addr)
+	return a
+}
+
 func remoteAddr(s string) netip.Addr {
 	if ap, err := netip.ParseAddrPort(s); err == nil {
 		return ap.Addr().Unmap().WithZone("")
@@ -130,6 +147,13 @@ func sourceKey(a netip.Addr) netip.Prefix {
 // allow takes one token from a's bucket. When the bucket is empty nothing
 // is taken and the wait until the next token is returned.
 func (l *ipLimiter) allow(a netip.Addr) (time.Duration, bool) {
+	_, d, ok := l.reserve(a, time.Now())
+	return d, ok
+}
+
+// reserve is allow at time now, returning the reservation so the caller can
+// give the token back with CancelAt(now).
+func (l *ipLimiter) reserve(a netip.Addr, now time.Time) (*rate.Reservation, time.Duration, bool) {
 	key := sourceKey(a)
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -146,7 +170,7 @@ func (l *ipLimiter) allow(a netip.Addr) (time.Duration, bool) {
 			delete(l.byKey, old.Value.(*ipBucket).key)
 		}
 	}
-	return reserveNow(b.lim)
+	return reserveAt(b.lim, now)
 }
 
 func (l *ipLimiter) len() int {
@@ -155,18 +179,40 @@ func (l *ipLimiter) len() int {
 	return l.order.Len()
 }
 
-// reserveNow takes a token only if one is available now; otherwise it takes
-// nothing and returns the wait (at least one second, for Retry-After).
-func reserveNow(lim *rate.Limiter) (time.Duration, bool) {
-	res := lim.Reserve()
-	if !res.OK() {
-		return time.Minute, false
+// admitSource charges a's bucket in perIP, then the global bucket. A source
+// its own bucket refuses never draws on the global one, so it cannot spend
+// the budget of everyone else; and when the global bucket refuses, the
+// source's token is given back, so a source does not pay for a budget that
+// others spent.
+func admitSource(perIP *ipLimiter, global *rate.Limiter, a netip.Addr) (time.Duration, bool) {
+	now := time.Now()
+	res, d, ok := perIP.reserve(a, now)
+	if !ok {
+		return d, false
 	}
-	if d := res.Delay(); d > 0 {
-		res.Cancel()
-		return max(d, time.Second), false
+	if _, d, ok := reserveAt(global, now); !ok {
+		// CancelAt with the reservation's own time: rate restores tokens only
+		// for a reservation that has not yet come due, and with a later time
+		// (Cancel uses time.Now) an immediate one never would.
+		res.CancelAt(now)
+		return d, false
 	}
 	return 0, true
+}
+
+// reserveAt takes a token only if one is available at now, and returns
+// its reservation; otherwise it takes nothing and returns the wait (at
+// least one second, for Retry-After).
+func reserveAt(lim *rate.Limiter, now time.Time) (*rate.Reservation, time.Duration, bool) {
+	res := lim.ReserveN(now, 1)
+	if !res.OK() {
+		return nil, time.Minute, false
+	}
+	if d := res.DelayFrom(now); d > 0 {
+		res.CancelAt(now)
+		return nil, max(d, time.Second), false
+	}
+	return res, 0, true
 }
 
 // retryAfter formats a wait as whole seconds, rounded up.

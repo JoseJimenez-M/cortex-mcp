@@ -35,6 +35,15 @@ const (
 	cimdMaxFailures = 1024
 	// cimdMaxStored bounds the CIMD rows kept in the database.
 	cimdMaxStored = 1000
+
+	// First-time fetches: a global bucket of 10, refilled every 6 s (10 a
+	// minute), and in front of it a bucket per source of cimdPerIPBurst,
+	// refilled every cimdPerIPEvery (2 a minute), so one source cannot
+	// spend the whole budget and keep new clients of others from connecting.
+	cimdGlobalBurst = 10
+	cimdGlobalEvery = 6 * time.Second
+	cimdPerIPBurst  = 3
+	cimdPerIPEvery  = 30 * time.Second
 )
 
 // errCIMD is the only error a client sees for a bad document or a failed
@@ -262,6 +271,7 @@ type cimdResolver struct {
 	allow     allowlist
 	fetch     func(context.Context, string) ([]byte, error)
 	limit     *rate.Limiter // first-time fetches, driven by anonymous /authorize requests
+	perIP     *ipLimiter    // per source, in front of limit
 	refetch   *rate.Limiter // refreshes of clients we already hold, kept apart so flooding cannot starve them
 	logger    *slog.Logger
 	maxStored int
@@ -282,13 +292,14 @@ type cimdResolver struct {
 // silence the cache stops vouching for it.
 const cimdStaleMax = 24 * time.Hour
 
-// newCIMDResolver limits cache misses to 10 a minute: /authorize is
-// unauthenticated, so without a limit anyone could make the server fetch
-// arbitrary public URLs at will.
+// newCIMDResolver limits cache misses to 10 a minute, 2 a minute per source
+// after a burst: /authorize is unauthenticated, so without a limit anyone
+// could make the server fetch arbitrary public URLs at will.
 func newCIMDResolver(store *Store, allow allowlist, fetch func(context.Context, string) ([]byte, error), logger *slog.Logger) *cimdResolver {
 	return &cimdResolver{
 		store: store, allow: allow, fetch: fetch, logger: logger,
-		limit:     rate.NewLimiter(rate.Every(6*time.Second), 10),
+		limit:     rate.NewLimiter(rate.Every(cimdGlobalEvery), cimdGlobalBurst),
+		perIP:     newIPLimiter(cimdPerIPEvery, cimdPerIPBurst, ipLimiterSize),
 		refetch:   rate.NewLimiter(rate.Every(2*time.Second), 20),
 		maxStored: cimdMaxStored,
 		failed:    map[string]time.Time{},
@@ -411,12 +422,16 @@ func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error
 		return unreachable()
 	}
 	// Only clients with a grant draw on the refetch budget: unconnected
-	// rows are as attacker-reachable as new ids and share their limiter.
-	lim := c.limit
+	// rows are as attacker-reachable as new ids and share their limiters
+	// (the source's bucket, then the global one; the source is the one
+	// Service put in ctx, or a shared bucket when there is none).
+	allowed := false
 	if granted {
-		lim = c.refetch
+		allowed = c.refetch.Allow()
+	} else {
+		_, allowed = admitSource(c.perIP, c.limit, sourceFrom(ctx))
 	}
-	if !lim.Allow() {
+	if !allowed {
 		c.logRateLimited()
 		return unreachable()
 	}
