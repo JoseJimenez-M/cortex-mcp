@@ -8,7 +8,7 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
 ## Shape
 
 - `Store` (store.go, owner.go, clients.go, grants.go) is every database operation on `auth.db`; the
-  CLI uses it directly (`setup`, `reset-auth`, `clients`).
+  CLI uses it directly (`setup`, `unlock-totp`, `reset-auth`, `clients`).
 - `Service` (service.go) is the HTTP side: it wraps `github.com/zitadel/oidc/v3/pkg/op` with
   `opStorage` (storage.go, grants.go) and adds our own handlers (`registrar`, `cimdResolver`,
   `loginPages`, `passkeys`).

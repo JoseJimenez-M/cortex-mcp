@@ -207,3 +207,82 @@ func TestResetAuthClearsOwnerAndOAuthButKeepsTokensAndKeys(t *testing.T) {
 		t.Fatalf("Setup after reset = %v", err)
 	}
 }
+
+func TestReplaceOwnerInvalidatesOldFactorsOnly(t *testing.T) {
+	s, clk := newTestStore(t)
+	old, err := s.Setup("h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSecret := ownerSecret(t, s)
+	if _, err := s.db.Exec(`INSERT INTO oauth_clients(id, kind, name, redirect_uris, created) VALUES('KEEPME', 'dcr', 'c', '[]', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO passkeys(id, credential, created) VALUES(x'01', x'02', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	sec, err := s.ReplaceOwner("h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ownerSecret(t, s)) == string(oldSecret) || len(sec.RecoveryCodes) != 10 || sec.EnrollToken == old.EnrollToken {
+		t.Fatal("ReplaceOwner kept the old factors")
+	}
+	if err := s.useRecoveryCode(old.RecoveryCodes[0]); !errors.Is(err, errBadCode) {
+		t.Fatalf("old recovery code after ReplaceOwner = %v", err)
+	}
+	if ok, _ := s.enrollmentValid(old.EnrollToken); ok {
+		t.Fatal("old enrollment link still valid")
+	}
+	if n, _ := s.passkeyCount(); n != 0 {
+		t.Fatalf("%d passkeys after ReplaceOwner", n)
+	}
+	if err := s.useRecoveryCode(sec.RecoveryCodes[0]); err != nil {
+		t.Fatalf("new recovery code = %v", err)
+	}
+	if _, err := s.verifyCode(hotp(oldSecret, uint64(totpStep(clk.Now())), totpDigits)); err == nil {
+		t.Fatal("old TOTP secret still accepted")
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM oauth_clients`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("OAuth clients after ReplaceOwner = %d, %v", n, err)
+	}
+}
+
+func TestReplaceOwnerWithoutOwnerSetsUp(t *testing.T) {
+	s, _ := newTestStore(t)
+	if _, err := s.ReplaceOwner("h"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.OwnerExists(); !ok {
+		t.Fatal("no owner after ReplaceOwner")
+	}
+}
+
+func TestUnlockTOTP(t *testing.T) {
+	s, clk := newTestStore(t)
+	if _, err := s.UnlockTOTP(); !errors.Is(err, ErrNotSetUp) {
+		t.Fatalf("UnlockTOTP before setup = %v", err)
+	}
+	if _, err := s.Setup("h"); err != nil {
+		t.Fatal(err)
+	}
+	secret := ownerSecret(t, s)
+	for i := 0; i < maxTOTPFailures; i++ {
+		_ = s.verifyTOTP(wrongTOTP(secret, clk.Now()))
+	}
+	good := hotp(secret, uint64(totpStep(clk.Now())), totpDigits)
+	if err := s.verifyTOTP(good); !errors.Is(err, errTOTPLocked) {
+		t.Fatalf("verifyTOTP while locked = %v", err)
+	}
+	n, err := s.UnlockTOTP()
+	if err != nil || n != maxTOTPFailures {
+		t.Fatalf("UnlockTOTP = %d, %v", n, err)
+	}
+	if err := s.verifyTOTP(good); err != nil {
+		t.Fatalf("verifyTOTP after unlock = %v", err)
+	}
+	if n, err := s.UnlockTOTP(); err != nil || n != 0 {
+		t.Fatalf("UnlockTOTP when not locked = %d, %v", n, err)
+	}
+}

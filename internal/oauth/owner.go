@@ -38,8 +38,18 @@ type SetupSecrets struct {
 
 // Setup creates the owner: a passkey user handle, a TOTP secret, ten
 // recovery codes, and a passkey enrollment token. It refuses to run twice;
-// reset-auth starts over. host labels the entry in the authenticator app.
-func (s *Store) Setup(host string) (SetupSecrets, error) {
+// ReplaceOwner or reset-auth starts over. host labels the entry in the
+// authenticator app.
+func (s *Store) Setup(host string) (SetupSecrets, error) { return s.setup(host, false) }
+
+// ReplaceOwner is Setup that first deletes the current owner's passkeys,
+// TOTP secret, recovery codes, and enrollment links (cortex-mcp setup
+// -force), in the same transaction, so there is never a moment with old and
+// new factors both valid or with no owner at all. OAuth clients and their
+// grants stay: cutting those off is reset-auth's job.
+func (s *Store) ReplaceOwner(host string) (SetupSecrets, error) { return s.setup(host, true) }
+
+func (s *Store) setup(host string, replace bool) (SetupSecrets, error) {
 	secret := randBytes(totpSecretBytes)
 	codes := make([]string, recoveryCodeCount)
 	for i := range codes {
@@ -47,6 +57,11 @@ func (s *Store) Setup(host string) (SetupSecrets, error) {
 	}
 	token := randToken()
 	err := s.tx(func(tx *sql.Tx) error {
+		if replace {
+			if err := deleteOwnerTx(tx); err != nil {
+				return err
+			}
+		}
 		var n int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM owner`).Scan(&n); err != nil {
 			return err
@@ -69,6 +84,39 @@ func (s *Store) Setup(host string) (SetupSecrets, error) {
 		return SetupSecrets{}, err
 	}
 	return SetupSecrets{TOTPURI: otpauthURI(secret, host), TOTPSecret: base32NoPad(secret), RecoveryCodes: codes, EnrollToken: token}, nil
+}
+
+// ownerTables hold the owner's factors; deleting them all is what
+// invalidates every factor at once.
+var ownerTables = []string{"owner", "passkeys", "recovery_codes", "enrollments"}
+
+func deleteOwnerTx(tx *sql.Tx) error {
+	for _, table := range ownerTables {
+		// Table names are constants; DELETE cannot take them as parameters.
+		if _, err := tx.Exec(`DELETE FROM ` + table); err != nil { // #nosec G202 -- constant table names
+			return err
+		}
+	}
+	return nil
+}
+
+// UnlockTOTP clears the TOTP failure count (cortex-mcp unlock-totp), so
+// the owner can log in with an authenticator code again without spending a
+// recovery code. It returns the count it cleared.
+func (s *Store) UnlockTOTP() (int, error) {
+	var fails int
+	err := s.tx(func(tx *sql.Tx) error {
+		err := tx.QueryRow(`SELECT totp_failures FROM owner WHERE id = 1`).Scan(&fails)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotSetUp
+		}
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE owner SET totp_failures = 0 WHERE id = 1`)
+		return err
+	})
+	return fails, err
 }
 
 // NewEnrollment issues another passkey enrollment token for an existing
@@ -109,9 +157,11 @@ func (s *Store) OwnerExists() (bool, error) {
 // off too. Bearer tokens and the signing keys stay.
 func (s *Store) ResetAuth() error {
 	return s.tx(func(tx *sql.Tx) error {
+		if err := deleteOwnerTx(tx); err != nil {
+			return err
+		}
 		for _, table := range []string{
-			"owner", "passkeys", "recovery_codes", "enrollments", "auth_requests", "auth_codes",
-			"access_tokens", "refresh_tokens", "grants", "oauth_clients",
+			"auth_requests", "auth_codes", "access_tokens", "refresh_tokens", "grants", "oauth_clients",
 		} {
 			// Table names are constants; DELETE cannot take them as parameters.
 			if _, err := tx.Exec(`DELETE FROM ` + table); err != nil { // #nosec G202 -- constant table names
