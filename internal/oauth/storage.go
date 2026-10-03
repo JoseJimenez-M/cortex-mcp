@@ -21,6 +21,7 @@ var (
 	errClientNotFound      = errors.New("client not found")
 	errAuthRequestNotFound = errors.New("authorization request not found or expired")
 	errNotSupported        = errors.New("not supported by this server")
+	errStorage             = errors.New("storage error")
 )
 
 // opStorage is the op.Storage the zitadel provider runs on. Errors returned
@@ -128,15 +129,17 @@ func validChallenge(c string) bool {
 // browser binding set by Service.authorize. An *oidc.Error here is
 // redirected to the client with the iss parameter added.
 func (o *opStorage) CreateAuthRequest(ctx context.Context, req *oidc.AuthRequest, _ string) (op.AuthRequest, error) {
-	if req.CodeChallengeMethod != oidc.CodeChallengeMethodS256 || !validChallenge(req.CodeChallenge) {
-		return nil, oidc.ErrInvalidRequest().WithDescription("PKCE with code_challenge_method=S256 is required")
-	}
 	// The library's native-client check is looser than our allowlist (any
 	// loopback address, either scheme, userinfo, fragments, escapes), so the
 	// matcher runs again on the request's own URI. redirectDisabled keeps the
 	// library from redirecting the error to the URI it rejects.
 	if !o.allow.allows(req.RedirectURI) {
 		return nil, oidc.ErrInvalidRequestRedirectURI().WithDescription("the redirect_uri is not allowed")
+	}
+	// Only now is the URI trusted enough for the library to redirect the
+	// PKCE error to it.
+	if req.CodeChallengeMethod != oidc.CodeChallengeMethodS256 || !validChallenge(req.CodeChallenge) {
+		return nil, oidc.ErrInvalidRequest().WithDescription("PKCE with code_challenge_method=S256 is required")
 	}
 	browser, _ := ctx.Value(browserKey{}).(string)
 	if browser == "" {
@@ -149,7 +152,10 @@ func (o *opStorage) CreateAuthRequest(ctx context.Context, req *oidc.AuthRequest
 		Created: o.s.now(),
 	}
 	if err := o.s.createAuthRequest(a); err != nil {
-		return nil, err
+		if !errors.Is(err, ErrNotFound) {
+			o.logger.Error("create auth request failed", "err", err)
+		}
+		return nil, errStorage
 	}
 	return a, nil
 }
@@ -157,6 +163,9 @@ func (o *opStorage) CreateAuthRequest(ctx context.Context, req *oidc.AuthRequest
 func (o *opStorage) AuthRequestByID(_ context.Context, id string) (op.AuthRequest, error) {
 	a, err := o.s.authRequest(id)
 	if err != nil {
+		if !errors.Is(err, ErrNotFound) {
+			o.logger.Warn("auth request lookup failed", "err", err)
+		}
 		return nil, errAuthRequestNotFound
 	}
 	return a, nil
@@ -165,17 +174,28 @@ func (o *opStorage) AuthRequestByID(_ context.Context, id string) (op.AuthReques
 func (o *opStorage) AuthRequestByCode(_ context.Context, code string) (op.AuthRequest, error) {
 	a, err := o.s.authRequestByCode(code)
 	if err != nil {
+		if !errors.Is(err, errInvalidCode) {
+			o.logger.Warn("code redemption failed", "err", err)
+		}
 		return nil, errInvalidCode
 	}
 	return a, nil
 }
 
 func (o *opStorage) SaveAuthCode(_ context.Context, id, code string) error {
-	return o.s.saveAuthCode(id, code)
+	if err := o.s.saveAuthCode(id, code); err != nil {
+		o.logger.Warn("save auth code failed", "err", err)
+		return errStorage
+	}
+	return nil
 }
 
 func (o *opStorage) DeleteAuthRequest(_ context.Context, id string) error {
-	return o.s.deleteAuthRequest(id)
+	if err := o.s.deleteAuthRequest(id); err != nil {
+		o.logger.Warn("delete auth request failed", "err", err)
+		return errStorage
+	}
+	return nil
 }
 
 func (o *opStorage) SigningKey(context.Context) (op.SigningKey, error) { return o.signing, nil }
@@ -220,4 +240,10 @@ func (o *opStorage) ValidateJWTProfileScopes(context.Context, string, []string) 
 	return nil, errNotSupported
 }
 
-func (o *opStorage) Health(ctx context.Context) error { return o.s.db.PingContext(ctx) }
+func (o *opStorage) Health(ctx context.Context) error {
+	if err := o.s.db.PingContext(ctx); err != nil {
+		o.logger.Warn("health check failed", "err", err)
+		return errStorage
+	}
+	return nil
+}

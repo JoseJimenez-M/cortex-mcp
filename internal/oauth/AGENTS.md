@@ -57,7 +57,9 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
 ## Library behaviours we rely on (re-check on every zitadel/oidc bump)
 
 1. An `*oidc.Error` returned by `CreateAuthRequest` is redirected to the already validated redirect URI
-   (S256 enforcement relies on it).
+   (S256 enforcement relies on it). `ErrInvalidRequestRedirectURI` is flagged redirect-disabled and is
+   rendered as an error page; the allowlist re-check in `CreateAuthRequest` relies on it, and runs
+   before the PKCE check so no error is ever redirected to an unvetted URI.
 2. The provider decodes `/authorize` parameters from `r.Form` after our wrapper parsed it (the default
    scope relies on it).
 3. `op.WithCORSOptions(nil)` disables CORS entirely.

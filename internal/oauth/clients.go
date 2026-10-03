@@ -57,7 +57,7 @@ func (s *Store) saveCIMD(c clientRow) error {
 // requests are evicted. That is deliberate. Exempting every client with an
 // open request would let an attacker pin slots by opening requests, since
 // /authorize is unauthenticated. The one exemption is a request the owner
-// has already approved (done = 1, see registerDCR): only the owner can
+// has already approved (done = 1, which keys on the request's created time, see registerDCR): only the owner can
 // produce that state. dcr_test.go asserts that an attacker alone, limited
 // by the registration rate, can never fill the table with clients younger
 // than this and so cannot cause 503s.
@@ -71,8 +71,8 @@ var errRegistryFull = errors.New("client registry full")
 // never-used clients (no grant) count against maxUnused. When full, the
 // oldest never-used client created at least minAge ago is evicted to make
 // room; if there is none, errRegistryFull. Clients with grants are never
-// counted or evicted, and neither is one whose login the owner has approved
-// within the last authRequestTTL (its code is about to be exchanged).
+// counted or evicted, and neither is one with an owner-approved request
+// created within the last authRequestTTL (its code is about to be exchanged).
 func (s *Store) registerDCR(c clientRow, maxUnused int, minAge time.Duration) error {
 	uris, err := json.Marshal(c.RedirectURIs)
 	if err != nil {

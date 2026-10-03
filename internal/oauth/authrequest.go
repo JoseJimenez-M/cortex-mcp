@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	codeTTL         = 5 * time.Minute
+	codeTTL         = 60 * time.Second // clients exchange within seconds
 	accessTTL       = time.Hour
 	refreshTTL      = 30 * 24 * time.Hour
 	unusedClientTTL = 24 * time.Hour // a client that never completed a grant
@@ -162,7 +162,8 @@ func (s *Store) saveAuthCode(id, code string) error {
 		// the code carries the family a grant will be created under.
 		var family string
 		err := tx.QueryRow(`SELECT r.family FROM auth_requests r JOIN oauth_clients c ON c.id = r.client_id
-			WHERE r.id = ? AND r.done = 1 AND r.created > ?`, id, s.now().Add(-authRequestTTL).Unix()).Scan(&family)
+			WHERE r.id = ? AND r.done = 1 AND r.created > ?
+			AND NOT EXISTS (SELECT 1 FROM auth_codes k WHERE k.auth_request_id = r.id)`, id, s.now().Add(-authRequestTTL).Unix()).Scan(&family)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}

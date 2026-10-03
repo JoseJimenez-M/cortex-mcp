@@ -164,9 +164,54 @@ func TestCreateAuthRequestRequiresS256(t *testing.T) {
 func TestCreateAuthRequestNeedsBrowserBinding(t *testing.T) {
 	o, s, _ := newTestOP(t)
 	addClient(t, s, "C", "http://127.0.0.1/callback")
-	_, err := o.CreateAuthRequest(context.Background(), &oidc.AuthRequest{ClientID: "C", CodeChallenge: s256("v"), CodeChallengeMethod: oidc.CodeChallengeMethodS256}, "")
-	if err == nil {
-		t.Fatal("request without a browser binding accepted")
+	_, err := o.CreateAuthRequest(context.Background(), &oidc.AuthRequest{ClientID: "C", RedirectURI: "http://127.0.0.1/callback",
+		CodeChallenge: s256("v"), CodeChallengeMethod: oidc.CodeChallengeMethodS256}, "")
+	var oe *oidc.Error
+	if !errors.As(err, &oe) || oe.ErrorType != oidc.ServerError || !strings.Contains(oe.Description, "authorize handler") {
+		t.Fatalf("err = %v", err)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM auth_requests`); n != 0 {
+		t.Fatalf("%d requests stored", n)
+	}
+}
+
+// A bad-PKCE request with a URI the library accepts but we do not must not
+// get a redirectable error.
+func TestAllowlistIsCheckedBeforePKCE(t *testing.T) {
+	o, s, _ := newTestOP(t)
+	addClient(t, s, "C", "http://127.0.0.1/callback")
+	_, err := o.CreateAuthRequest(withBrowser(), &oidc.AuthRequest{ClientID: "C", RedirectURI: "http://evil.com@127.0.0.1/callback"}, "")
+	var oe *oidc.Error
+	if !errors.As(err, &oe) || !oe.IsRedirectDisabled() {
+		t.Fatalf("err = %v, want redirect-disabled", err)
+	}
+}
+
+func TestOneCodePerAuthRequest(t *testing.T) {
+	o, s, _ := newTestOP(t)
+	addClient(t, s, "C", "http://127.0.0.1/callback")
+	a := newApproved(t, o, "C", "http://127.0.0.1/callback")
+	if err := o.SaveAuthCode(context.Background(), a.ID, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SaveAuthCode(context.Background(), a.ID, "second"); err == nil {
+		t.Fatal("second code saved for one request")
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM auth_codes`); n != 1 {
+		t.Fatalf("%d codes", n)
+	}
+}
+
+func TestStorageErrorsReachTheLibraryAsFixedText(t *testing.T) {
+	o, s, _ := newTestOP(t)
+	_ = s.db.Close()
+	for _, err := range []error{
+		o.SaveAuthCode(context.Background(), "x", "SECRETCODE"),
+		o.DeleteAuthRequest(context.Background(), "x"),
+	} {
+		if !errors.Is(err, errStorage) {
+			t.Fatalf("err = %v, want errStorage", err)
+		}
 	}
 }
 
