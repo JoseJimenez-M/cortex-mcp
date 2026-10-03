@@ -1,5 +1,6 @@
-# Keeps the SHA-pinned actions and the Go modules current. Pins by commit SHA
-# stop a moved tag from changing what CI runs; Dependabot proposes the bumps.
+# Keeps the SHA-pinned actions, the Go modules, and the digest-pinned base
+# image current. Pins by commit SHA or digest stop a moved tag from changing
+# what CI runs or what the image contains; Dependabot proposes the bumps.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -7,6 +8,10 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
