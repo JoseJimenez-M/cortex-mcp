@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,11 @@ const (
 // errCIMD is the only error a client sees for a bad document or a failed
 // fetch; the details go to the operator log.
 var errCIMD = errors.New("client metadata document rejected")
+
+// errCIMDPolicy marks the rejections that mean the host served a
+// well-formed document that this server's policy refuses. Only these revoke
+// a connected client; garbage bodies are treated like an unreachable host.
+var errCIMDPolicy = errors.New("policy")
 
 // isCIMDClientID reports whether a client_id is a metadata document URL
 // rather than an id this server issued (DCR ids are base32, never URLs).
@@ -111,20 +117,23 @@ type cimdDoc struct {
 // allowlist.
 func parseCIMD(clientID string, body []byte, a allowlist) (clientRow, error) {
 	var d cimdDoc
+	if t := bytes.TrimSpace(body); len(t) == 0 || t[0] != '{' {
+		return clientRow{}, fmt.Errorf("%w: not a JSON object", errCIMD)
+	}
 	if err := json.Unmarshal(body, &d); err != nil {
 		return clientRow{}, fmt.Errorf("%w: not a JSON object", errCIMD)
 	}
 	if d.ClientID != clientID {
-		return clientRow{}, fmt.Errorf("%w: client_id does not match the document URL", errCIMD)
+		return clientRow{}, fmt.Errorf("%w: %w: client_id does not match the document URL", errCIMD, errCIMDPolicy)
 	}
 	if strings.TrimSpace(d.ClientName) == "" {
 		return clientRow{}, fmt.Errorf("%w: client_name is required", errCIMD)
 	}
 	if m := d.TokenEndpointAuthMethod; m != "" && m != "none" {
-		return clientRow{}, fmt.Errorf("%w: only public clients (token_endpoint_auth_method none) are supported", errCIMD)
+		return clientRow{}, fmt.Errorf("%w: %w: only public clients (token_endpoint_auth_method none) are supported", errCIMD, errCIMDPolicy)
 	}
 	if _, err := a.checkRedirectSet(d.RedirectURIs); err != nil {
-		return clientRow{}, fmt.Errorf("%w: %v", errCIMD, err)
+		return clientRow{}, fmt.Errorf("%w: %w: %v", errCIMD, errCIMDPolicy, err)
 	}
 	return clientRow{ID: clientID, Kind: kindCIMD, Name: cleanName(d.ClientName), RedirectURIs: d.RedirectURIs}, nil
 }
@@ -261,6 +270,8 @@ type cimdResolver struct {
 	failed      map[string]time.Time // client_id -> when the failure expires
 	limitLogged time.Time
 	limitHits   int
+	staleLogged time.Time
+	staleHits   int
 }
 
 // cimdStaleMax is how long past its fetch time a connected client's cached
@@ -340,6 +351,20 @@ func (c *cimdResolver) logRateLimited() {
 	c.limitHits = 0
 }
 
+// logServedStale aggregates the stale-serve events like logRateLimited does.
+func (c *cimdResolver) logServedStale() {
+	now := c.store.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.staleHits++
+	if now.Sub(c.staleLogged) < time.Minute {
+		return
+	}
+	c.staleLogged = now
+	c.logger.Info("client metadata unavailable, served stale document for connected clients", "count", c.staleHits)
+	c.staleHits = 0
+}
+
 func (s *Store) hasGrant(id string) (bool, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM grants WHERE client_id = ?`, id).Scan(&n)
@@ -360,21 +385,35 @@ func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error
 	if err := checkCIMDURL(id); err != nil {
 		return clientRow{}, err
 	}
-	// unreachable is a transport-level failure: the document was not seen,
-	// so a connected client keeps working from its stale row for a while.
+	granted := false
+	if known {
+		granted, err = c.store.hasGrant(id)
+		if err != nil {
+			return clientRow{}, err
+		}
+	}
+	// unreachable covers every case where no acceptable document was seen:
+	// transport failures, non-200 or wrong content type, rate limiting, and
+	// bodies that are not a JSON object. A connected client keeps working
+	// from its stale row for cimdStaleMax. Only a well-formed document that
+	// policy refuses (client_id mismatch, redirect set not allowed, a
+	// non-public auth method) revokes: garbage is something a broken or
+	// hijacked host can serve cheaply, and revoking on it would let an
+	// outage or an attacker in the path destroy approved connections.
 	unreachable := func() (clientRow, error) {
-		if known && c.store.now().Sub(row.Fetched) < cimdStaleMax {
-			if ok, err := c.store.hasGrant(id); err == nil && ok {
-				return row, nil
-			}
+		if granted && c.store.now().Sub(row.Fetched) < cimdStaleMax {
+			c.logServedStale()
+			return row, nil
 		}
 		return clientRow{}, errCIMD
 	}
 	if c.recentlyFailed(id) {
 		return unreachable()
 	}
+	// Only clients with a grant draw on the refetch budget: unconnected
+	// rows are as attacker-reachable as new ids and share their limiter.
 	lim := c.limit
-	if known {
+	if granted {
 		lim = c.refetch
 	}
 	if !lim.Allow() {
@@ -393,9 +432,12 @@ func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error
 	if err != nil {
 		c.logger.Warn("client metadata document rejected", "client_id", id, "err", err)
 		c.recordFailure(id)
+		if !errors.Is(err, errCIMDPolicy) {
+			return unreachable()
+		}
 		if known {
-			// The host answered and the document is no longer acceptable:
-			// drop the client and every grant it holds.
+			// The host served a document policy refuses: drop the client
+			// and every grant it holds.
 			if rerr := c.store.RevokeClient(id); rerr != nil && !errors.Is(rerr, ErrNotFound) {
 				return clientRow{}, rerr
 			}

@@ -390,3 +390,86 @@ func TestRateLimitLogIsAggregatedAndOmitsIDs(t *testing.T) {
 		t.Fatalf("log = %q", out)
 	}
 }
+
+func TestUngrantedRowsCannotDrainTheRefetchBudget(t *testing.T) {
+	granted := "https://granted.example.com/c.json"
+	fetch := func(_ context.Context, id string) ([]byte, error) {
+		if id == granted {
+			return cimdBody(granted, "New", "http://127.0.0.1/cb"), nil
+		}
+		return nil, errors.New("unreachable")
+	}
+	s, clk := newTestStore(t)
+	r := newCIMDResolver(s, defaultAllowlist(t), fetch, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	plant := func(id string) {
+		row := clientRow{ID: id, Kind: kindCIMD, Name: "Old", RedirectURIs: []string{"http://127.0.0.1/cb"}, Created: clk.Now(), Fetched: clk.Now()}
+		if err := s.saveCIMD(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plant(granted)
+	insertGrant(t, s, "F1", granted)
+	for i := 0; i < 50; i++ {
+		plant("https://junk" + strconv.Itoa(i) + ".example.com/c.json")
+	}
+	clk.Advance(cimdTTL + time.Second)
+	for i := 0; i < 50; i++ {
+		_, _ = r.resolve(context.Background(), "https://junk"+strconv.Itoa(i)+".example.com/c.json")
+	}
+	row, err := r.resolve(context.Background(), granted)
+	if err != nil || row.Name != "New" {
+		t.Fatalf("granted refetch = %+v, %v (served stale or refused)", row, err)
+	}
+}
+
+func TestMalformedRefetchIsUnreachableNotRevocation(t *testing.T) {
+	for name, body := range map[string][]byte{"html": []byte("<html>"), "array": []byte("[]"), "null": []byte("null")} {
+		r, f, s, _ := grantedResolver(t)
+		f.body.Store(body)
+		row, err := r.resolve(context.Background(), testCIMD)
+		if err != nil || row.Name != "Old" {
+			t.Errorf("%s: = %+v, %v", name, row, err)
+		}
+		if _, err := s.clientByID(testCIMD); err != nil {
+			t.Errorf("%s: row dropped: %v", name, err)
+		}
+	}
+}
+
+func TestPolicyFailuresRevoke(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"mismatch": cimdBody("https://other.example.com/c.json", "A", "http://127.0.0.1/cb"),
+		"mixed":    cimdBody(testCIMD, "A", "http://127.0.0.1/cb", "https://claude.ai/api/mcp/auth_callback"),
+		"secret":   []byte(`{"client_id":"` + testCIMD + `","client_name":"A","redirect_uris":["http://127.0.0.1/cb"],"token_endpoint_auth_method":"private_key_jwt"}`),
+	} {
+		r, f, s, _ := grantedResolver(t)
+		f.body.Store(body)
+		if _, err := r.resolve(context.Background(), testCIMD); !errors.Is(err, errCIMD) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		if _, err := s.clientByID(testCIMD); !errors.Is(err, ErrNotFound) {
+			t.Errorf("%s: row kept: %v", name, err)
+		}
+	}
+}
+
+func TestStaleServeLogIsAggregated(t *testing.T) {
+	var buf strings.Builder
+	f := &fakeFetch{err: errors.New("boom")}
+	f.body.Store(cimdBody(testCIMD, "Old", "http://127.0.0.1/cb"))
+	s, clk := newTestStore(t)
+	r := newCIMDResolver(s, defaultAllowlist(t), f.fetch, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err := s.saveCIMD(clientRow{ID: testCIMD, Kind: kindCIMD, Name: "Old", RedirectURIs: []string{"http://127.0.0.1/cb"}, Created: clk.Now(), Fetched: clk.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	insertGrant(t, s, "F1", testCIMD)
+	clk.Advance(cimdTTL + time.Second)
+	for i := 0; i < 4; i++ {
+		if _, err := r.resolve(context.Background(), testCIMD); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(buf.String(), "served stale"); n != 1 {
+		t.Fatalf("%d stale log lines: %s", n, buf.String())
+	}
+}
