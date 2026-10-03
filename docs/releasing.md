@@ -58,8 +58,9 @@ and does not move the `latest` image tag.
    ```
 
 3. Watch the run: `gh run watch --exit-status $(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')`.
-   The job checks that the tag is on `main`, runs the tests, builds everything, publishes the GitHub
-   release, pushes and signs the image.
+   A `test` job runs the tests with a read-only token; only when they pass does the `release` job
+   check that the tag is on `main`, build everything, publish the GitHub release, and push and sign
+   the image.
 4. Verify the published release as an operator would (next section), and edit the release notes if
    the generated changelog needs context (upgrade steps, breaking changes).
 

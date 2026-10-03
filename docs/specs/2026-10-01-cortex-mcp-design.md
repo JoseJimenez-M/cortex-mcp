@@ -424,17 +424,19 @@ must carry the committed `THIRD_PARTY_NOTICES`. A failing gate blocks merge.
 `.github/workflows/release.yml` on `v*` tags. It builds linux/amd64, linux/arm64, darwin/amd64,
 darwin/arm64, and windows/amd64 binaries (`CGO_ENABLED=0`, `-trimpath`, `server.Version` set by the
 linker), archives them (tar.gz, zip for Windows) with `LICENSE`, `THIRD_PARTY_NOTICES`, `README.md`,
-`config.example.yaml`, and `docs/*.md`, writes `checksums.txt` and an SPDX SBOM per archive (syft), signs `checksums.txt` keylessly
-with cosign (a `.sigstore.json` bundle; GitHub OIDC identity of `release.yml` at the tag), and pushes a
-multi-arch image (linux/amd64, linux/arm64) to `ghcr.io/josejimenez-m/cortex-mcp` with `dockers_v2`,
-built from the same binaries on `gcr.io/distroless/static-debian13:nonroot` pinned by digest, with a
-BuildKit SBOM attestation, signed keylessly by digest. Decisions made with plan 3: the base moved from
-debian12 to debian13 (distroless no longer lists debian12 as updated); the release job runs only while
-the repository is public and only for tags on `main`, with `contents`, `packages`, and `id-token` write
-and nothing else; every action is pinned by commit SHA and the base image by digest (Dependabot bumps
-both); GoReleaser and syft are pinned by version; no QEMU (the image build runs no commands), no
-windows/arm64 binary, no separate provenance attestation; `latest` moves only for non-prerelease tags.
-Making the repository public and pushing the first tag are owner decisions, never automated.
+`config.example.yaml`, and `docs/*.md`, writes `checksums.txt` and an SPDX SBOM per archive (syft),
+signs `checksums.txt` keylessly with cosign (a `.sigstore.json` bundle; GitHub OIDC identity of
+`release.yml` at the tag), and pushes a multi-arch image (linux/amd64, linux/arm64) to
+`ghcr.io/josejimenez-m/cortex-mcp` with `dockers_v2`, built from the same binaries on
+`gcr.io/distroless/static-debian13:nonroot` pinned by digest, with a BuildKit SBOM attestation, signed
+keylessly by digest. Decisions made with plan 3: the base moved from debian12 to debian13 (distroless no
+longer lists debian12 as updated); the release job runs only while the repository is public and only for
+tags on `main`, with `contents`, `packages`, and `id-token` write and nothing else, after the tests pass
+in a separate job with read-only `contents`; every action is pinned by commit SHA and the base image by
+digest (Dependabot bumps both); GoReleaser and syft are pinned by version; no QEMU (the image build runs
+no commands), no windows/arm64 binary, no separate provenance attestation; `latest` moves only for
+non-prerelease tags. Making the repository public and pushing the first tag are owner decisions, never
+automated.
 
 **Docs (English), shipped with the code and in every release archive:** `README.md` (what, status,
 security in brief, install pointers, commands, licence), `docs/install.md` (requirements, binary or
