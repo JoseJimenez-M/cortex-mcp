@@ -24,6 +24,7 @@ is missing, search for it (`grep -rn`), never assume. The design source of truth
 | HTTP, auth, rate limits, sessions | `internal/server/AGENTS.md` | spec sections 4 and 6 |
 | Config keys and defaults | `internal/config/config.go` | spec section 7, `config.example.yaml` |
 | Bearer tokens | `internal/tokens/tokens.go` | spec section 6.3 |
+| The auth database file, schema, migrations | `internal/authdb/authdb.go` | spec section 6.5 |
 | Commands and flags | `internal/cli/cli.go` | `README.md` |
 | Executing planned work | the current file in `docs/plans/` | the spec sections it cites |
 
@@ -31,10 +32,11 @@ is missing, search for it (`grep -rn`), never assume. The design source of truth
 
 ```
 cmd/cortex-mcp   ->  internal/cli
-internal/cli     ->  server, vault, logs, tokens, config
+internal/cli     ->  server, vault, logs, tokens, authdb, config
 internal/server  ->  tools, vault, logs, tokens, config
 internal/tools   ->  vault, logs
-internal/tokens  ->  internal/fsperm
+internal/tokens  ->  internal/authdb
+internal/authdb  ->  internal/fsperm
 internal/logs    ->  internal/fsperm
 internal/config, internal/vault, internal/fsperm: leaves
 ```

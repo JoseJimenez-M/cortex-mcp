@@ -8,17 +8,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"fmt"
-	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/JoseJimenez-M/cortex-mcp/internal/fsperm"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
+
+	"github.com/JoseJimenez-M/cortex-mcp/internal/authdb"
 )
 
 var (
@@ -41,9 +38,6 @@ const (
 	// maxSecretLen bounds hashing work on junk input. A real secret is
 	// len(prefix)+43 characters.
 	maxSecretLen = 128
-	// schemaVersion is stored in PRAGMA user_version so later plans (OAuth)
-	// can migrate the same database. Version 2 added the id column.
-	schemaVersion = 2
 	// lastUsedGranularity limits last_used writes to one per token per
 	// minute: the value is informational, and a write per request would
 	// serialize every authenticated call behind SQLite's writer lock.
@@ -68,154 +62,33 @@ type Identity struct {
 // Store is the token table inside the auth database. It is safe for
 // concurrent use.
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db    *sql.DB
+	now   func() time.Time
+	owned bool // Close closes db only when Open created it
 }
 
-// Open creates the database if needed. The state directory is 0700 and the
-// database and its WAL/SHM side files are 0600 from the moment they exist.
+// Open opens the auth database at path on its own connection (the token
+// commands use this) and returns its token table. See authdb.Open for the
+// file permissions and migrations.
 func Open(path string) (*Store, error) {
-	// Absolute only: a relative path would make the chmod below land on
-	// whatever the working directory happens to be.
-	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("tokens: open %s: path must be absolute", path)
-	}
-	if err := preparePath(path); err != nil {
-		return nil, fmt.Errorf("tokens: open %s: %w", path, err)
-	}
-	db, err := sql.Open("sqlite", dsn(path))
+	db, err := authdb.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("tokens: open %s: %w", path, err)
+		return nil, err
 	}
-	// One connection is the simplest correct choice for SQLite here: the
-	// load is a handful of lookups per minute, and it serializes writers
-	// without SQLITE_BUSY handling.
-	db.SetMaxOpenConns(1)
-	if err := migrate(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("tokens: open %s: %w", path, err)
-	}
-	return &Store{db: db, now: time.Now}, nil
+	return &Store{db: db, now: time.Now, owned: true}, nil
 }
 
-// preparePath creates the state directory and database file with private
-// modes before SQLite sees them. SQLite gives the -wal and -shm files the
-// mode of the main file, so a 0600 main file means 0600 side files with no
-// umask window.
-func preparePath(path string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := fsperm.PrivateDir(dir); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- path is operator configuration, not request input
-	if err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		// Tighten files left by an older or manually created database.
-		if err := fsperm.PrivateFile(p); err != nil {
-			return err
-		}
-	}
-	return nil
+// New returns the token table of an auth database the caller opened with
+// authdb.Open. The caller keeps ownership: Close leaves db open, so serve
+// can share one connection between tokens and OAuth.
+func New(db *sql.DB) *Store {
+	return &Store{db: db, now: time.Now}
 }
 
-// dsn builds a file: URI so that spaces, '#', '?' and '%' in the path cannot
-// be taken for URI syntax.
-func dsn(abs string) string {
-	p := filepath.ToSlash(abs)
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p // Windows drive paths: file:///C:/...
-	}
-	u := url.URL{
-		Scheme:   "file",
-		Path:     p,
-		RawQuery: "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)",
-	}
-	return u.String()
-}
-
-func migrate(db *sql.DB) error {
-	var v int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
-		return err
-	}
-	if v > schemaVersion {
-		return fmt.Errorf("auth database has schema version %d, this build supports up to %d", v, schemaVersion)
-	}
-	if v == schemaVersion {
-		return nil
-	}
-	// One transaction, so a failure leaves the database at its old version
-	// (user_version lives in the database header and is transactional).
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }() // no-op after Commit
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS bearer_tokens (
-		name      TEXT PRIMARY KEY,
-		hash      BLOB NOT NULL UNIQUE,
-		created   INTEGER NOT NULL,
-		last_used INTEGER NOT NULL DEFAULT 0
-	)`); err != nil {
-		return err
-	}
-	if v < 2 {
-		if err := addIDColumn(tx); err != nil {
-			return err
-		}
-	}
-	// PRAGMA does not accept bound parameters; the value is a constant.
-	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// addIDColumn is the version 1 to 2 migration. Name is the primary key, but a
-// name is free again after a revoke, and the implicit rowid can be reused once
-// the highest row is deleted, so neither identifies a token row for good. A
-// random id per row does. ALTER TABLE cannot add a NOT NULL column without a
-// default, so the column is nullable; every row is filled here and Create
-// always sets it.
-func addIDColumn(tx *sql.Tx) error {
-	if _, err := tx.Exec(`ALTER TABLE bearer_tokens ADD COLUMN id TEXT`); err != nil {
-		return err
-	}
-	rows, err := tx.Query(`SELECT name FROM bearer_tokens WHERE id IS NULL`)
-	if err != nil {
-		return err
-	}
-	var names []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		names = append(names, n)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, n := range names {
-		if _, err := tx.Exec(`UPDATE bearer_tokens SET id = ? WHERE name = ?`, rand.Text(), n); err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(`CREATE UNIQUE INDEX bearer_tokens_id ON bearer_tokens(id)`)
-	return err
-}
+// IsBearer reports whether s has the shape of a secret from Create. The
+// server uses it to route a presented token to this store or to OAuth
+// without a database lookup; OAuth access tokens never start with prefix.
+func IsBearer(s string) bool { return strings.HasPrefix(s, prefix) }
 
 func hash(secret string) []byte {
 	sum := sha256.Sum256([]byte(secret))
@@ -327,5 +200,10 @@ func (s *Store) Revoke(name string) error {
 	return nil
 }
 
-// Close closes the database. Calling it again is a no-op.
-func (s *Store) Close() error { return s.db.Close() }
+// Close closes the database if Open created it. Calling it again is a no-op.
+func (s *Store) Close() error {
+	if !s.owned {
+		return nil
+	}
+	return s.db.Close()
+}

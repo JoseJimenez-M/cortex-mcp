@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/JoseJimenez-M/cortex-mcp/internal/authdb"
 )
 
 func open(t *testing.T) (*Store, string) {
@@ -218,8 +220,8 @@ func TestReopenKeepsDataAndSchemaVersion(t *testing.T) {
 	s, p := open(t)
 	secret, _ := s.Create("muse")
 	var v int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
-		t.Fatalf("user_version = %d, %v; want %d", v, err, schemaVersion)
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != authdb.SchemaVersion {
+		t.Fatalf("user_version = %d, %v; want %d", v, err, authdb.SchemaVersion)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -232,7 +234,7 @@ func TestReopenKeepsDataAndSchemaVersion(t *testing.T) {
 	if n, err := s2.Verify(secret); err != nil || n.Name != "muse" {
 		t.Fatalf("after reopen: %+v, %v", n, err)
 	}
-	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
+	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != authdb.SchemaVersion {
 		t.Fatalf("user_version after reopen = %d, %v", v, err)
 	}
 }
@@ -416,7 +418,7 @@ func v1Database(t *testing.T, p string, rows map[string]string) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", dsn(p))
+	db, err := sql.Open("sqlite", p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,8 +450,8 @@ func TestMigrateFromVersion1(t *testing.T) {
 		t.Fatal(err)
 	}
 	var v int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 2 {
-		t.Fatalf("user_version after migration = %d, %v; want 2", v, err)
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != authdb.SchemaVersion {
+		t.Fatalf("user_version after migration = %d, %v; want %d", v, err, authdb.SchemaVersion)
 	}
 	ids := map[string]Identity{}
 	for name, secret := range secrets {
@@ -477,5 +479,35 @@ func TestMigrateFromVersion1(t *testing.T) {
 	}
 	if _, err := s2.db.Exec(`UPDATE bearer_tokens SET id = (SELECT id FROM bearer_tokens WHERE name = 'cli') WHERE name = 'muse'`); err == nil {
 		t.Fatal("duplicate identities accepted: id must be unique")
+	}
+}
+
+func TestNewSharesTheCallersDatabase(t *testing.T) {
+	db, err := authdb.Open(filepath.Join(t.TempDir(), "state", "auth.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	s := New(db)
+	secret, err := s.Create("muse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Fatalf("Close on a shared store closed the caller's database: %v", err)
+	}
+	if id, err := New(db).Verify(secret); err != nil || id.Name != "muse" {
+		t.Fatalf("Verify through a second store = %+v, %v", id, err)
+	}
+}
+
+func TestIsBearer(t *testing.T) {
+	s, _ := open(t)
+	secret, _ := s.Create("muse")
+	if !IsBearer(secret) || IsBearer("eyJhbGciOi.x.y.z.w") || IsBearer("") {
+		t.Fatal("IsBearer misclassifies")
 	}
 }
