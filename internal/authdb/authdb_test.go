@@ -218,3 +218,65 @@ func TestFailedMigrationRollsBack(t *testing.T) {
 		t.Fatalf("token lost: %q, %v", name, err)
 	}
 }
+
+// TestReadThenWriteAcrossConnections is the CLI (setup, clients revoke)
+// writing auth.db while serve has it open: two pools on one file, each
+// running read-then-write transactions. A deferred transaction would fail
+// with SQLITE_BUSY when its read snapshot goes stale; transactions must take
+// the write lock up front so busy_timeout can make them wait instead.
+func TestReadThenWriteAcrossConnections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.db")
+	var dbs [2]*sql.DB
+	for i := range dbs {
+		db, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		dbs[i] = db
+	}
+	if _, err := dbs[0].Exec(`INSERT INTO bearer_tokens(name, hash, created) VALUES('n', x'00', 0)`); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 400)
+	for _, db := range dbs {
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range 50 {
+					tx, err := db.Begin()
+					if err != nil {
+						errs <- err
+						return
+					}
+					var c int64
+					if err := tx.QueryRow(`SELECT created FROM bearer_tokens WHERE name = 'n'`).Scan(&c); err != nil {
+						_ = tx.Rollback()
+						errs <- err
+						return
+					}
+					if _, err := tx.Exec(`UPDATE bearer_tokens SET created = ? WHERE name = 'n'`, c+1); err != nil {
+						_ = tx.Rollback()
+						errs <- err
+						return
+					}
+					if err := tx.Commit(); err != nil {
+						errs <- err
+						return
+					}
+				}
+			}()
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	var c int64
+	if err := dbs[0].QueryRow(`SELECT created FROM bearer_tokens WHERE name = 'n'`).Scan(&c); err != nil || c != 400 {
+		t.Fatalf("counter = %d, %v; want 400 (a lost update means transactions overlapped)", c, err)
+	}
+}

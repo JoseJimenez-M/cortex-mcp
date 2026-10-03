@@ -84,10 +84,15 @@ func dsn(abs string) string {
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p // Windows drive paths: file:///C:/...
 	}
+	// _txlock=immediate: every transaction takes the write lock at BEGIN.
+	// The CLI writes this file while serve has it open, and a deferred
+	// transaction that reads then writes fails at once with SQLITE_BUSY
+	// when the other process committed in between; busy_timeout only
+	// helps when the wait happens at BEGIN.
 	u := url.URL{
 		Scheme:   "file",
 		Path:     p,
-		RawQuery: "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)",
+		RawQuery: "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate",
 	}
 	return u.String()
 }
