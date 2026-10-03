@@ -30,10 +30,12 @@ var (
 
 // SetupSecrets are shown once by cortex-mcp setup and never again.
 type SetupSecrets struct {
-	TOTPURI       string   // otpauth:// URI for an authenticator app
-	TOTPSecret    string   // the same secret in base32, for manual entry
-	RecoveryCodes []string // ten single-use codes, XXXX-XXXX-XXXX-XXXX
-	EnrollToken   string   // one-time passkey enrollment token, valid enrollTTL
+	TOTPURI       string    // otpauth:// URI for an authenticator app
+	TOTPSecret    string    // the same secret in base32, for manual entry
+	RecoveryCodes []string  // ten single-use codes, XXXX-XXXX-XXXX-XXXX
+	EnrollToken   string    // one-time passkey enrollment token, valid enrollTTL
+	EnrollExpires time.Time // when EnrollToken stops working
+	Replaced      bool      // ReplaceOwner deleted an existing owner's factors
 }
 
 // Setup creates the owner: a passkey user handle, a TOTP secret, ten
@@ -45,8 +47,12 @@ func (s *Store) Setup(host string) (SetupSecrets, error) { return s.setup(host, 
 // ReplaceOwner is Setup that first deletes the current owner's passkeys,
 // TOTP secret, recovery codes, and enrollment links (cortex-mcp setup
 // -force), in the same transaction, so there is never a moment with old and
-// new factors both valid or with no owner at all. OAuth clients and their
-// grants stay: cutting those off is reset-auth's job.
+// new factors both valid or with no owner at all. It also drops approvals
+// the old factors gave that have not become a grant yet: authorization
+// requests already approved and unused authorization codes, which could
+// otherwise still be exchanged for tokens. Used codes stay (replay
+// detection needs them), and so do OAuth clients and their grants: cutting
+// those off is reset-auth's job.
 func (s *Store) ReplaceOwner(host string) (SetupSecrets, error) { return s.setup(host, true) }
 
 func (s *Store) setup(host string, replace bool) (SetupSecrets, error) {
@@ -56,10 +62,24 @@ func (s *Store) setup(host string, replace bool) (SetupSecrets, error) {
 		codes[i] = newRecoveryCode()
 	}
 	token := randToken()
+	expires := s.now().Add(enrollTTL)
+	replaced := false
 	err := s.tx(func(tx *sql.Tx) error {
 		if replace {
+			var err error
+			if replaced, err = ownerExistsTx(tx); err != nil {
+				return err
+			}
 			if err := deleteOwnerTx(tx); err != nil {
 				return err
+			}
+			for _, q := range []string{
+				`DELETE FROM auth_requests WHERE done = 1`,
+				`DELETE FROM auth_codes WHERE used = 0`,
+			} {
+				if _, err := tx.Exec(q); err != nil {
+					return err
+				}
 			}
 		}
 		var n int
@@ -78,12 +98,15 @@ func (s *Store) setup(host string, replace bool) (SetupSecrets, error) {
 				return err
 			}
 		}
-		return s.insertEnrollment(tx, token)
+		return insertEnrollment(tx, token, expires)
 	})
 	if err != nil {
 		return SetupSecrets{}, err
 	}
-	return SetupSecrets{TOTPURI: otpauthURI(secret, host), TOTPSecret: base32NoPad(secret), RecoveryCodes: codes, EnrollToken: token}, nil
+	return SetupSecrets{
+		TOTPURI: otpauthURI(secret, host), TOTPSecret: base32NoPad(secret), RecoveryCodes: codes,
+		EnrollToken: token, EnrollExpires: expires, Replaced: replaced,
+	}, nil
 }
 
 // ownerTables hold the owner's factors; deleting them all is what
@@ -120,9 +143,10 @@ func (s *Store) UnlockTOTP() (int, error) {
 }
 
 // NewEnrollment issues another passkey enrollment token for an existing
-// owner (cortex-mcp setup -passkey).
-func (s *Store) NewEnrollment() (string, error) {
+// owner (cortex-mcp setup -passkey), and when it expires.
+func (s *Store) NewEnrollment() (string, time.Time, error) {
 	token := randToken()
+	expires := s.now().Add(enrollTTL)
 	err := s.tx(func(tx *sql.Tx) error {
 		var n int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM owner`).Scan(&n); err != nil {
@@ -131,17 +155,23 @@ func (s *Store) NewEnrollment() (string, error) {
 		if n == 0 {
 			return ErrNotSetUp
 		}
-		return s.insertEnrollment(tx, token)
+		return insertEnrollment(tx, token, expires)
 	})
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
-	return token, nil
+	return token, expires, nil
 }
 
-func (s *Store) insertEnrollment(tx *sql.Tx, token string) error {
-	_, err := tx.Exec(`INSERT INTO enrollments(hash, expires) VALUES(?, ?)`, hashToken(token), s.now().Add(enrollTTL).Unix())
+func insertEnrollment(tx *sql.Tx, token string, expires time.Time) error {
+	_, err := tx.Exec(`INSERT INTO enrollments(hash, expires) VALUES(?, ?)`, hashToken(token), expires.Unix())
 	return err
+}
+
+func ownerExistsTx(tx *sql.Tx) (bool, error) {
+	var n int
+	err := tx.QueryRow(`SELECT COUNT(*) FROM owner`).Scan(&n)
+	return n > 0, err
 }
 
 // OwnerExists reports whether setup has run.

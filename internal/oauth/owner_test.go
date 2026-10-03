@@ -145,7 +145,7 @@ func TestCodesNeedAnOwner(t *testing.T) {
 	if _, err := s.verifyCode("AAAA-AAAA-AAAA-AAAA"); !errors.Is(err, ErrNotSetUp) {
 		t.Fatalf("recovery without owner = %v", err)
 	}
-	if _, err := s.NewEnrollment(); !errors.Is(err, ErrNotSetUp) {
+	if _, _, err := s.NewEnrollment(); !errors.Is(err, ErrNotSetUp) {
 		t.Fatalf("NewEnrollment without owner = %v", err)
 	}
 }
@@ -165,9 +165,15 @@ func TestEnrollmentTokens(t *testing.T) {
 	if err := s.consumeEnrollment(sec.EnrollToken); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second consume = %v", err)
 	}
-	tok, err := s.NewEnrollment()
+	tok, exp, err := s.NewEnrollment()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if want := clk.Now().Add(enrollTTL); !exp.Equal(want) {
+		t.Fatalf("NewEnrollment expires %v, want %v", exp, want)
+	}
+	if !sec.EnrollExpires.Equal(clk.Now().Add(enrollTTL)) {
+		t.Fatalf("Setup EnrollExpires = %v", sec.EnrollExpires)
 	}
 	clk.Advance(enrollTTL + time.Second)
 	if ok, _ := s.enrollmentValid(tok); ok {
@@ -221,9 +227,38 @@ func TestReplaceOwnerInvalidatesOldFactorsOnly(t *testing.T) {
 	if _, err := s.db.Exec(`INSERT INTO passkeys(id, credential, created) VALUES(x'01', x'02', 1)`); err != nil {
 		t.Fatal(err)
 	}
+	// Pending approvals: a request the old owner already approved (done = 1)
+	// and an unused code. Both could still turn into tokens after the
+	// factors that approved them are gone, so ReplaceOwner drops them; a
+	// request still waiting for login and a used code (kept for replay
+	// detection) stay.
+	for _, q := range []string{
+		`INSERT INTO auth_requests(id, client_id, request, browser, csrf, family, done, created) VALUES('approved', 'KEEPME', '{}', 'b', 'c', 'f1', 1, 1)`,
+		`INSERT INTO auth_requests(id, client_id, request, browser, csrf, family, done, created) VALUES('waiting', 'KEEPME', '{}', 'b', 'c', 'f2', 0, 1)`,
+		`INSERT INTO auth_codes(hash, auth_request_id, family, used, expires) VALUES(x'01', 'approved', 'f1', 0, 9999999999)`,
+		`INSERT INTO auth_codes(hash, auth_request_id, family, used, expires) VALUES(x'02', 'old', 'f0', 1, 9999999999)`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
 	sec, err := s.ReplaceOwner("h")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !sec.Replaced {
+		t.Fatal("ReplaceOwner over an owner: Replaced = false")
+	}
+	var ids string
+	if err := s.db.QueryRow(`SELECT group_concat(id) FROM auth_requests`).Scan(&ids); err != nil || ids != "waiting" {
+		t.Fatalf("auth_requests after ReplaceOwner = %q, %v", ids, err)
+	}
+	var codes int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM auth_codes WHERE used = 1`).Scan(&codes); err != nil || codes != 1 {
+		t.Fatalf("used codes after ReplaceOwner = %d, %v", codes, err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM auth_codes WHERE used = 0`).Scan(&codes); err != nil || codes != 0 {
+		t.Fatalf("unused codes after ReplaceOwner = %d, %v", codes, err)
 	}
 	if string(ownerSecret(t, s)) == string(oldSecret) || len(sec.RecoveryCodes) != 10 || sec.EnrollToken == old.EnrollToken {
 		t.Fatal("ReplaceOwner kept the old factors")
@@ -251,8 +286,8 @@ func TestReplaceOwnerInvalidatesOldFactorsOnly(t *testing.T) {
 
 func TestReplaceOwnerWithoutOwnerSetsUp(t *testing.T) {
 	s, _ := newTestStore(t)
-	if _, err := s.ReplaceOwner("h"); err != nil {
-		t.Fatal(err)
+	if sec, err := s.ReplaceOwner("h"); err != nil || sec.Replaced {
+		t.Fatalf("ReplaceOwner without owner: Replaced = %v, %v", sec.Replaced, err)
 	}
 	if ok, _ := s.OwnerExists(); !ok {
 		t.Fatal("no owner after ReplaceOwner")

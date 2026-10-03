@@ -40,9 +40,10 @@ issues another passkey enrollment link. -force replaces every factor: the
 current passkeys, authenticator entry and recovery codes stop working.
 unlock-totp clears the lock after too many wrong authenticator codes.
 reset-auth deletes the owner's factors and every OAuth client and grant,
-keeping Bearer tokens; it asks you to type "reset" unless -yes is given.
-clients revoke takes an id from clients list, or a name that matches one
-credential only.
+keeping Bearer tokens; it reads the word "reset" from stdin as confirmation
+unless -yes is given (under docker compose exec, use -yes or a TTY).
+clients revoke takes an id from clients list (a Bearer token's name is its
+id), or the name of exactly one OAuth client.
 
 Flags go before NAME and ID. The config path defaults to $CORTEX_MCP_CONFIG,
 then /etc/cortex-mcp/config.yaml.

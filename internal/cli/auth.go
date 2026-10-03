@@ -49,7 +49,7 @@ func setup(cfg config.Config, passkeyOnly, force bool, stdout, stderr io.Writer)
 	st := oauth.NewStore(db, time.Now)
 	base := strings.TrimSuffix(cfg.PublicURL, "/")
 	if passkeyOnly {
-		token, err := st.NewEnrollment()
+		token, expires, err := st.NewEnrollment()
 		if errors.Is(err, oauth.ErrNotSetUp) {
 			fmt.Fprintln(stderr, "setup -passkey: the owner is not set up yet; run cortex-mcp setup first")
 			return 1
@@ -58,7 +58,7 @@ func setup(cfg config.Config, passkeyOnly, force bool, stdout, stderr io.Writer)
 			fmt.Fprintln(stderr, "setup:", err)
 			return 1
 		}
-		printEnrollment(stdout, base, token)
+		printEnrollment(stdout, base, token, expires)
 		return 0
 	}
 	u, err := url.Parse(base)
@@ -87,10 +87,10 @@ func setup(cfg config.Config, passkeyOnly, force bool, stdout, stderr io.Writer)
 		fmt.Fprintln(stdout, "   "+c)
 	}
 	fmt.Fprintln(stdout)
-	printEnrollment(stdout, base, sec.EnrollToken)
+	printEnrollment(stdout, base, sec.EnrollToken, sec.EnrollExpires)
 	fmt.Fprintln(stderr, "These secrets are shown only once. Keep the three factors in different places (passkey in a password manager, TOTP in an authenticator app, recovery codes offline).")
-	if force {
-		fmt.Fprintln(stderr, "The previous passkeys, authenticator entry and recovery codes no longer work. Connected OAuth clients stay connected; disconnect them with cortex-mcp clients revoke or cortex-mcp reset-auth.")
+	if sec.Replaced {
+		fmt.Fprintln(stderr, "The previous passkeys, authenticator entry and recovery codes no longer work, and logins they approved that had not yet connected were dropped. Connected OAuth clients stay connected; disconnect them with cortex-mcp clients revoke or cortex-mcp reset-auth.")
 	}
 	if !cfg.OAuth.Enabled {
 		fmt.Fprintln(stderr, "warning: oauth.enabled is false in the config; assistants cannot connect through OAuth until it is true.")
@@ -98,13 +98,14 @@ func setup(cfg config.Config, passkeyOnly, force bool, stdout, stderr io.Writer)
 	return 0
 }
 
-func printEnrollment(w io.Writer, base, token string) {
-	fmt.Fprintf(w, "3. Passkey. With the server running, open this link within 10 minutes and enter a current authenticator code:\n   %s/enroll#%s\n", base, token)
+func printEnrollment(w io.Writer, base, token string, expires time.Time) {
+	fmt.Fprintf(w, "3. Passkey. With the server running, open this link before %s (single use) and enter a current authenticator code:\n   %s/enroll#%s\n",
+		expires.UTC().Format(time.RFC3339), base, token)
 }
 
 // resetAuth is the last resort when factors are lost or stolen; it needs
-// shell access on the host by construction. Without -yes it asks for the
-// word "reset" on stdin, so a mistyped command cannot wipe the owner; a
+// shell access on the host by construction. Without -yes it reads the
+// word "reset" from stdin (so docker compose exec needs a TTY, or -yes), so a mistyped command cannot wipe the owner; a
 // closed or non-interactive stdin is a refusal.
 func resetAuth(cfg config.Config, yes bool, stdin io.Reader, stdout, stderr io.Writer) int {
 	if !yes {
@@ -125,6 +126,9 @@ func resetAuth(cfg config.Config, yes bool, stdin io.Reader, stdout, stderr io.W
 		return 1
 	}
 	fmt.Fprintln(stdout, "OAuth state cleared: the owner's credentials and every OAuth client are gone. Bearer tokens were kept. Run cortex-mcp setup to set up the owner again.")
+	if !cfg.BearerTokens {
+		fmt.Fprintln(stderr, "warning: bearer_tokens is false, so no client can authenticate until cortex-mcp setup runs again; serve refuses to start until then.")
+	}
 	return 0
 }
 
@@ -226,13 +230,15 @@ func cell(s string) string {
 	}, s)
 }
 
-// revokeClient revokes exactly one credential. An OAuth client id is
-// matched first and is never ambiguous: DCR ids are uppercase base32 and
-// CIMD ids are URLs, while Bearer token names are lowercase, so the id
-// spaces cannot collide. Otherwise the argument is a name: a Bearer token's
-// or an OAuth client's display name. Display names are chosen by clients and
-// need not be unique, so a name that matches more than one credential is
-// refused with the candidate ids.
+// revokeClient revokes exactly one credential. Ids come first and are
+// never ambiguous: a Bearer token's name is its id, an OAuth client has a
+// DCR id (uppercase base32) or a CIMD id (a URL), and token names are
+// lowercase, so the id spaces cannot collide. Only when no id matches is the
+// argument taken as an OAuth client's display name. Display names are
+// chosen by whoever registered the client and need not be unique, so they
+// never shadow an id (a client registering itself as "laptop" cannot block
+// revoking the token "laptop"), and a name that matches more than one
+// client is refused.
 func revokeClient(toks *tokens.Store, st *oauth.Store, arg string, stdout, stderr io.Writer) int {
 	cls, err := st.ListClients()
 	if err != nil {
@@ -248,39 +254,29 @@ func revokeClient(toks *tokens.Store, st *oauth.Store, arg string, stdout, stder
 			byName = append(byName, c)
 		}
 	}
-	recs, err := toks.List()
-	if err != nil {
+	err = toks.Revoke(arg)
+	if err == nil {
+		fmt.Fprintln(stdout, "revoked Bearer token", arg)
+		return 0
+	}
+	if !errors.Is(err, tokens.ErrNotFound) {
 		fmt.Fprintln(stderr, "clients revoke:", err)
 		return 1
 	}
-	var candidates []string
-	tokenMatch := false
-	for _, r := range recs {
-		if r.Name == arg {
-			tokenMatch = true
-			candidates = append(candidates, "Bearer token "+r.Name)
-		}
-	}
-	for _, c := range byName {
-		candidates = append(candidates, "OAuth client "+cell(c.ID))
-	}
-	switch {
-	case len(candidates) == 0:
+	switch len(byName) {
+	case 0:
 		fmt.Fprintf(stderr, "clients revoke: no Bearer token or OAuth client has the id or name %q (see cortex-mcp clients list)\n", cell(arg))
 		return 1
-	case len(candidates) > 1:
-		fmt.Fprintf(stderr, "clients revoke: %q names more than one credential: %s. Nothing was revoked; revoke one by its id.\n",
-			cell(arg), strings.Join(candidates, ", "))
-		return 1
-	case tokenMatch:
-		if err := toks.Revoke(arg); err != nil {
-			fmt.Fprintln(stderr, "clients revoke:", err)
-			return 1
-		}
-		fmt.Fprintln(stdout, "revoked Bearer token", arg)
-		return 0
-	default:
+	case 1:
 		return revokeOAuth(st, byName[0], stdout, stderr)
+	default:
+		ids := make([]string, len(byName))
+		for i, c := range byName {
+			ids[i] = cell(c.ID)
+		}
+		fmt.Fprintf(stderr, "clients revoke: %q is the name of %d OAuth clients (%s). Nothing was revoked; run cortex-mcp clients list and revoke one by its id.\n",
+			cell(arg), len(byName), strings.Join(ids, ", "))
+		return 1
 	}
 }
 

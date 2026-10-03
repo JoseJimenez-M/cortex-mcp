@@ -145,6 +145,8 @@ func TestVersion(t *testing.T) {
 	}
 }
 
+var enrollExpiry = regexp.MustCompile(`before \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ`)
+
 var recoveryLine = regexp.MustCompile(`(?m)^   [A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}$`)
 
 // execAuthDB runs SQL against the config's auth.db, as a test fixture.
@@ -173,8 +175,10 @@ func TestSetupPrintsTheThreeFactorsOnce(t *testing.T) {
 		t.Fatalf("setup: %d %s", code, errOut)
 	}
 	if !strings.Contains(out, "otpauth://totp/cortex-mcp:localhost?") || len(recoveryLine.FindAllString(out, -1)) != 10 ||
-		!strings.Contains(out, "http://localhost:8080/enroll#") || !strings.Contains(errOut, "shown only once") {
-		t.Fatalf("setup output:\n%s\n%s", out, errOut)
+		!strings.Contains(out, "http://localhost:8080/enroll#") || !strings.Contains(errOut, "shown only once") ||
+		!enrollExpiry.MatchString(out) {
+		t.Fatalf("setup output (stdout withheld: it holds secrets): %d recovery lines, expiry %v\n%s",
+			len(recoveryLine.FindAllString(out, -1)), enrollExpiry.MatchString(out), errOut)
 	}
 	for _, c := range recoveryLine.FindAllString(out, -1) {
 		if strings.Contains(errOut, strings.TrimSpace(c)) {
@@ -189,10 +193,15 @@ func TestSetupPrintsTheThreeFactorsOnce(t *testing.T) {
 
 func TestSetupForceReplacesTheFactors(t *testing.T) {
 	cfg := writeConfig(t)
-	_, first, _ := run("setup", "-config", cfg)
+	// Without an owner -force is a plain setup: nothing was replaced.
+	if code, _, errOut := run("setup", "-config", cfg, "-force"); code != 0 || strings.Contains(errOut, "no longer work") {
+		t.Fatalf("setup -force without owner: %d %q", code, errOut)
+	}
+	_, first, _ := run("setup", "-config", cfg, "-force")
 	code, out, errOut := run("setup", "-config", cfg, "-force")
-	if code != 0 || len(recoveryLine.FindAllString(out, -1)) != 10 || !strings.Contains(errOut, "no longer work") {
-		t.Fatalf("setup -force: %d\n%s\n%s", code, out, errOut)
+	if code != 0 || len(recoveryLine.FindAllString(out, -1)) != 10 || !strings.Contains(errOut, "no longer work") ||
+		!strings.Contains(errOut, "approved") {
+		t.Fatalf("setup -force: %d (stdout withheld) %q", code, errOut)
 	}
 	if recoveryLine.FindString(first) == recoveryLine.FindString(out) {
 		t.Fatal("setup -force printed the old recovery codes")
@@ -208,8 +217,8 @@ func TestSetupPasskeyIssuesANewLink(t *testing.T) {
 		t.Fatal("setup failed")
 	}
 	code, out, _ := run("setup", "-config", cfg, "-passkey")
-	if code != 0 || !strings.Contains(out, "http://localhost:8080/enroll#") || strings.Contains(out, "otpauth://") {
-		t.Fatalf("setup -passkey: %d %q", code, out)
+	if code != 0 || !strings.Contains(out, "http://localhost:8080/enroll#") || strings.Contains(out, "otpauth://") || !enrollExpiry.MatchString(out) {
+		t.Fatalf("setup -passkey: %d (stdout withheld: it holds the link token)", code)
 	}
 }
 
@@ -232,6 +241,18 @@ func TestResetAuthNeedsConfirmation(t *testing.T) {
 	}
 	if code, out, _ := run("reset-auth", "-config", cfg, "-yes"); code != 0 || !strings.Contains(out, "cortex-mcp setup") {
 		t.Fatalf("reset-auth -yes: %d %q", code, out)
+	}
+}
+
+func TestResetAuthWarnsWhenBearerTokensAreOff(t *testing.T) {
+	cfg := writeConfigExtra(t, "bearer_tokens: false\n")
+	_, _, _ = run("setup", "-config", cfg)
+	code, _, errOut := run("reset-auth", "-config", cfg, "-yes")
+	if code != 0 || !strings.Contains(errOut, "bearer_tokens is false") {
+		t.Fatalf("reset-auth with bearer_tokens false: %d %q", code, errOut)
+	}
+	if _, _, errOut := run("reset-auth", "-config", writeConfig(t), "-yes"); strings.Contains(errOut, "bearer_tokens") {
+		t.Fatalf("warned with bearer_tokens on: %q", errOut)
 	}
 }
 
@@ -309,21 +330,25 @@ func TestClientsRevokeRefusesAmbiguousNames(t *testing.T) {
 		`INSERT INTO oauth_clients(id, kind, name, redirect_uris, created) VALUES('BBBB', 'dcr', 'Claude', '[]', 2)`,
 		`INSERT INTO oauth_clients(id, kind, name, redirect_uris, created) VALUES('CCCC', 'dcr', 'claude', '[]', 3)`)
 	code, out, errOut := run("clients", "revoke", "-config", cfg, "Claude")
-	if code != 1 || out != "" || !strings.Contains(errOut, "AAAA") || !strings.Contains(errOut, "BBBB") || !strings.Contains(errOut, "by its id") {
+	if code != 1 || out != "" || !strings.Contains(errOut, "AAAA") || !strings.Contains(errOut, "BBBB") || !strings.Contains(errOut, "clients list") {
 		t.Fatalf("ambiguous client name: %d %q %q", code, out, errOut)
 	}
-	// "claude" is both the Bearer token's name and client CCCC's name.
-	code, out, errOut = run("clients", "revoke", "-config", cfg, "claude")
-	if code != 1 || out != "" || !strings.Contains(errOut, "CCCC") || !strings.Contains(errOut, "Bearer token claude") {
-		t.Fatalf("token and client share a name: %d %q %q", code, out, errOut)
+	// A Bearer token name is an id. CCCC (a self-registered client anyone
+	// could have named "claude") must not block revoking the token.
+	if code, out, errOut := run("clients", "revoke", "-config", cfg, "claude"); code != 0 || !strings.Contains(out, "revoked Bearer token claude") {
+		t.Fatalf("revoke Bearer token by name: %d %q %q", code, out, errOut)
 	}
-	// An id is never ambiguous.
+	// An OAuth client id is never ambiguous either.
 	if code, out, _ := run("clients", "revoke", "-config", cfg, "AAAA"); code != 0 || !strings.Contains(out, "revoked OAuth client AAAA") {
 		t.Fatalf("revoke by id: %d %q", code, out)
 	}
 	_, out, _ = run("clients", "list", "-config", cfg)
-	if strings.Count(out, "\n") != 3 {
-		t.Fatalf("refused revokes changed state:\n%s", out)
+	if strings.Count(out, "\n") != 2 || !strings.Contains(out, "BBBB") || !strings.Contains(out, "CCCC") {
+		t.Fatalf("revokes touched the wrong credentials:\n%s", out)
+	}
+	// With the token gone, "claude" names one OAuth client only.
+	if code, out, _ := run("clients", "revoke", "-config", cfg, "claude"); code != 0 || !strings.Contains(out, "revoked OAuth client CCCC") {
+		t.Fatalf("revoke by unique display name: %d %q", code, out)
 	}
 }
 

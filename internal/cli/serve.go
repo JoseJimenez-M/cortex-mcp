@@ -68,7 +68,7 @@ func vaultOptions(cfg config.Config) vault.Options {
 // config validation cannot see the database, and without an owner no
 // client could authenticate at all.
 func oauthService(cfg config.Config, db *sql.DB, lg *slog.Logger) (*oauth.Service, error) {
-	owner, err := oauth.NewStore(db, nil).OwnerExists()
+	owner, err := oauth.NewStore(db, time.Now).OwnerExists()
 	if err != nil {
 		return nil, err
 	}

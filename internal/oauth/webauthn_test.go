@@ -538,7 +538,7 @@ func TestPasskeysRequireUserVerification(t *testing.T) {
 	if n, _ := e.svc.store.passkeyCount(); n != 0 {
 		t.Fatal("a credential without user verification was stored")
 	}
-	token, err := e.svc.store.NewEnrollment()
+	token, _, err := e.svc.store.NewEnrollment()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -760,7 +760,7 @@ func TestFinishEnrollStorageErrors(t *testing.T) {
 	k := newSoftKey(t, e.url)
 	e.enroll(t, k, sec.EnrollToken)
 	// The same authenticator again: a conflict, not a server error.
-	token, err := e.svc.store.NewEnrollment()
+	token, _, err := e.svc.store.NewEnrollment()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +771,7 @@ func TestFinishEnrollStorageErrors(t *testing.T) {
 	if _, err := e.svc.store.db.Exec(`CREATE TRIGGER fail_insert BEFORE INSERT ON passkeys BEGIN SELECT RAISE(ABORT, 'disk on fire'); END`); err != nil {
 		t.Fatal(err)
 	}
-	token, _ = e.svc.store.NewEnrollment()
+	token, _, _ = e.svc.store.NewEnrollment()
 	status, out := e.enrollFinish(t, newSoftKey(t, e.url), e.enrollBegin(t, token))
 	if status != http.StatusInternalServerError || strings.Contains(fmt.Sprint(out), "fire") {
 		t.Fatalf("storage failure: %d %v", status, out)
