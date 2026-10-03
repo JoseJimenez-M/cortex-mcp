@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,17 +25,32 @@ const usage = `cortex-mcp: an MCP server for a Markdown vault
 
 Usage:
   cortex-mcp serve [-config path]
+  cortex-mcp setup [-config path] [-passkey | -force]
+  cortex-mcp unlock-totp [-config path]
+  cortex-mcp reset-auth [-config path] [-yes]
+  cortex-mcp clients list [-config path]
+  cortex-mcp clients revoke [-config path] ID
   cortex-mcp token create [-config path] NAME
   cortex-mcp token list [-config path]
   cortex-mcp token revoke [-config path] NAME
   cortex-mcp version
 
-Flags go before NAME. The config path defaults to $CORTEX_MCP_CONFIG, then
-/etc/cortex-mcp/config.yaml.
+setup creates the owner's login factors and prints them once. -passkey only
+issues another passkey enrollment link. -force replaces every factor: the
+current passkeys, authenticator entry and recovery codes stop working.
+unlock-totp clears the lock after too many wrong authenticator codes.
+reset-auth deletes the owner's factors and every OAuth client and grant,
+keeping Bearer tokens; it asks you to type "reset" unless -yes is given.
+clients revoke takes an id from clients list, or a name that matches one
+credential only.
+
+Flags go before NAME and ID. The config path defaults to $CORTEX_MCP_CONFIG,
+then /etc/cortex-mcp/config.yaml.
 `
 
 // Run executes one command and returns the exit code: 0 ok, 1 failure, 2 usage.
-func Run(args []string, stdout, stderr io.Writer) int {
+// stdin is read only by reset-auth, for its typed confirmation.
+func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 2
@@ -57,6 +73,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		// Server logs are machine-read, so they are JSON on stderr.
 		lg := slog.New(slog.NewJSONHandler(stderr, nil))
+		// The OAuth library logs protocol errors through slog.Default; send
+		// them to the same JSON stream. Our storage never puts a secret in
+		// an error it hands to the library (internal/oauth/AGENTS.md).
+		slog.SetDefault(lg)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		go func() {
@@ -71,6 +91,39 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "setup":
+		var passkeyOnly, force bool
+		p := parse("setup", args[1:], 0, stdout, stderr, func(fs *flag.FlagSet) {
+			// Each flag refuses the other while parsing, so the conflict is
+			// a usage error (exit 2) before the config is even read.
+			fs.BoolFunc("passkey", "only issue a new passkey enrollment link", exclusiveBool(&passkeyOnly, &force))
+			fs.BoolFunc("force", "replace the owner's factors; the current ones stop working", exclusiveBool(&force, &passkeyOnly))
+		})
+		if p.done {
+			return p.code
+		}
+		return setup(p.cfg, passkeyOnly, force, stdout, stderr)
+	case "unlock-totp":
+		p := parse("unlock-totp", args[1:], 0, stdout, stderr)
+		if p.done {
+			return p.code
+		}
+		return unlockTOTP(p.cfg, stdout, stderr)
+	case "reset-auth":
+		var yes bool
+		p := parse("reset-auth", args[1:], 0, stdout, stderr, func(fs *flag.FlagSet) {
+			fs.BoolVar(&yes, "yes", false, "confirm without the typed prompt")
+		})
+		if p.done {
+			return p.code
+		}
+		return resetAuth(p.cfg, yes, stdin, stdout, stderr)
+	case "clients":
+		if len(args) < 2 {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		return clients(args[1], args[2:], stdout, stderr)
 	case "token":
 		if len(args) < 2 {
 			fmt.Fprint(stderr, usage)
@@ -80,6 +133,22 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	default:
 		fmt.Fprint(stderr, usage)
 		return 2
+	}
+}
+
+// exclusiveBool sets *dst from a boolean flag value and fails when *other
+// is already set, for two flags that cannot be combined.
+func exclusiveBool(dst, other *bool) func(string) error {
+	return func(v string) error {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return err
+		}
+		if b && *other {
+			return errors.New("-passkey and -force cannot be combined")
+		}
+		*dst = b
+		return nil
 	}
 }
 
@@ -99,12 +168,15 @@ type parsed struct {
 	done bool
 }
 
-// parse reads -config and exactly nargs positional arguments, then loads
-// the config.
-func parse(name string, args []string, nargs int, stdout, stderr io.Writer) parsed {
+// parse reads -config, any flags that extra registers, and exactly nargs
+// positional arguments, then loads the config.
+func parse(name string, args []string, nargs int, stdout, stderr io.Writer, extra ...func(*flag.FlagSet)) parsed {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("config", defaultConfigPath(), "path to the config file")
+	for _, f := range extra {
+		f(fs)
+	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
@@ -167,11 +239,7 @@ func token(sub string, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		for _, r := range recs {
-			last := "never"
-			if !r.LastUsed.IsZero() {
-				last = r.LastUsed.Format(time.RFC3339)
-			}
-			fmt.Fprintf(stdout, "%s\tcreated %s\tlast used %s\n", r.Name, r.Created.Format(time.RFC3339), last)
+			fmt.Fprintf(stdout, "%s\tcreated %s\tlast used %s\n", r.Name, r.Created.Format(time.RFC3339), lastUsed(r.LastUsed))
 		}
 	case "revoke":
 		if err := store.Revoke(p.rest[0]); err != nil {

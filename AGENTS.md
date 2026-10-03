@@ -33,7 +33,7 @@ is missing, search for it (`grep -rn`), never assume. The design source of truth
 
 ```
 cmd/cortex-mcp   ->  internal/cli
-internal/cli     ->  server, vault, logs, tokens, authdb, config
+internal/cli     ->  server, vault, logs, tokens, authdb, oauth, config
 internal/server  ->  tools, vault, logs, tokens, oauth, config
 internal/tools   ->  vault, logs
 internal/oauth   ->  internal/config

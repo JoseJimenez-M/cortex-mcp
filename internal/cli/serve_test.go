@@ -254,3 +254,148 @@ func TestWarnExposedListen(t *testing.T) {
 		}
 	}
 }
+
+// startServe runs serveOn on a free port and returns its base URL and a stop
+// function that waits for a clean shutdown.
+func startServe(t *testing.T, cfgPath string) (string, func()) {
+	t.Helper()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveOn(ctx, cfg, ln, slog.New(slog.NewJSONHandler(io.Discard, nil)), 5*time.Second) }()
+	base := "http://" + ln.Addr().String()
+	for i := 0; i < 100; i++ {
+		if resp, err := http.Get(base + "/healthz"); err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return base, func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("serveOn: %v", err)
+		}
+	}
+}
+
+func TestServeMountsOAuth(t *testing.T) {
+	base, stop := startServe(t, writeConfig(t))
+	defer stop()
+	resp, err := http.Get(base + "/.well-known/oauth-authorization-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("AS metadata: %d", resp.StatusCode)
+	}
+	r2, err := http.Post(base+"/mcp", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r2.Body.Close()
+	if r2.StatusCode != http.StatusUnauthorized || !strings.Contains(r2.Header.Get("WWW-Authenticate"), "resource_metadata=") {
+		t.Fatalf("/mcp: %d %q", r2.StatusCode, r2.Header.Get("WWW-Authenticate"))
+	}
+}
+
+func TestServeWithOAuthDisabled(t *testing.T) {
+	base, stop := startServe(t, writeConfigExtra(t, "oauth:\n  enabled: false\n"))
+	defer stop()
+	resp, err := http.Get(base + "/.well-known/oauth-authorization-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("AS metadata with OAuth off: %d", resp.StatusCode)
+	}
+}
+
+func TestServeRefusesBearerOffBeforeSetup(t *testing.T) {
+	cfg, err := config.Load(writeConfigExtra(t, "bearer_tokens: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The timeout only bounds a regression (serveOn starting and serving);
+	// the refusal itself returns at once.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = serveOn(ctx, cfg, ln, slog.New(slog.NewJSONHandler(io.Discard, nil)), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "cortex-mcp setup") {
+		t.Fatalf("serveOn = %v", err)
+	}
+}
+
+// TestAuthCommandsWhileServing is the production flow: the CLI runs inside
+// the container (docker compose exec) against the auth.db that serve holds
+// open, and serve sees the result without a restart.
+func TestAuthCommandsWhileServing(t *testing.T) {
+	cfg := writeConfig(t)
+	base, stop := startServe(t, cfg)
+	defer stop()
+	code, out, errOut := run("setup", "-config", cfg)
+	if code != 0 || !strings.Contains(out, "http://localhost:8080/enroll#") {
+		t.Fatalf("setup while serving: %d %q", code, errOut)
+	}
+	link := out[strings.Index(out, "/enroll#")+len("/enroll#"):]
+	link = strings.TrimSpace(link[:strings.Index(link, "\n")+1])
+	// The running server accepts the enrollment link the CLI just wrote:
+	// a bad code is refused as a bad code (401), not as an invalid link (400).
+	resp, err := http.Post(base+"/enroll/begin", "application/json",
+		strings.NewReader(`{"token":"`+link+`","code":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("enroll/begin with a fresh link and a wrong code: %d", resp.StatusCode)
+	}
+	for _, args := range [][]string{
+		{"setup", "-config", cfg, "-passkey"},
+		{"unlock-totp", "-config", cfg},
+		{"clients", "list", "-config", cfg},
+		{"setup", "-config", cfg, "-force"},
+		{"reset-auth", "-config", cfg, "-yes"},
+	} {
+		if code, _, errOut := run(args...); code != 0 {
+			t.Fatalf("%v while serving: %d %q", args, code, errOut)
+		}
+	}
+}
+
+func TestWarnSharedRateLimits(t *testing.T) {
+	cases := []struct {
+		url     string
+		proxies []string
+		oauth   bool
+		warn    bool
+	}{
+		{"https://mcp.example.com", nil, true, true},
+		{"https://mcp.example.com", []string{"172.18.0.0/16"}, true, false},
+		{"https://mcp.example.com", nil, false, false},
+		{"http://localhost:8080", nil, true, false},
+	}
+	for _, c := range cases {
+		var buf bytes.Buffer
+		cfg := config.Default()
+		cfg.PublicURL, cfg.TrustedProxies, cfg.OAuth.Enabled = c.url, c.proxies, c.oauth
+		warnSharedRateLimits(cfg, slog.New(slog.NewJSONHandler(&buf, nil)))
+		got := strings.Contains(buf.String(), `"level":"WARN"`) && strings.Contains(buf.String(), "trusted_proxies")
+		if got != c.warn {
+			t.Errorf("%+v: warned=%v (%s)", c, got, buf.String())
+		}
+	}
+}

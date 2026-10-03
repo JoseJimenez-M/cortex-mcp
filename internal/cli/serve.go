@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,8 +12,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/JoseJimenez-M/cortex-mcp/internal/authdb"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/config"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/logs"
+	"github.com/JoseJimenez-M/cortex-mcp/internal/oauth"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/server"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/tokens"
 	"github.com/JoseJimenez-M/cortex-mcp/internal/vault"
@@ -60,6 +63,47 @@ func vaultOptions(cfg config.Config) vault.Options {
 	return o
 }
 
+// oauthService builds the authorization server when oauth.enabled is true
+// (nil otherwise), and refuses bearer_tokens: false until the owner exists:
+// config validation cannot see the database, and without an owner no
+// client could authenticate at all.
+func oauthService(cfg config.Config, db *sql.DB, lg *slog.Logger) (*oauth.Service, error) {
+	owner, err := oauth.NewStore(db, nil).OwnerExists()
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.BearerTokens && !owner {
+		return nil, errors.New("bearer_tokens is false but OAuth is not set up: run cortex-mcp setup first, or set bearer_tokens: true")
+	}
+	if !cfg.OAuth.Enabled {
+		return nil, nil
+	}
+	if !owner {
+		lg.Warn("OAuth is enabled but not set up: assistants cannot log in until you run cortex-mcp setup")
+	}
+	warnSharedRateLimits(cfg, lg)
+	return oauth.New(oauth.Options{
+		DB: db, PublicURL: cfg.PublicURL, RedirectAllowlist: cfg.OAuth.RedirectAllowlist,
+		TrustedProxies: cfg.TrustedProxies, Logger: lg,
+	})
+}
+
+// warnSharedRateLimits warns when public_url is https (so a proxy sits in
+// front) and trusted_proxies is empty: every request then comes from the
+// proxy's address, and the per-source limits on login and client
+// registration collapse into one bucket that one attacker can exhaust for
+// everyone, the owner included. It is a warning because that is safe, only
+// coarse, and a direct https listener (no proxy) is not wrong.
+func warnSharedRateLimits(cfg config.Config, lg *slog.Logger) {
+	if !cfg.OAuth.Enabled || len(cfg.TrustedProxies) > 0 {
+		return
+	}
+	if u, err := url.Parse(cfg.PublicURL); err != nil || u.Scheme != "https" {
+		return
+	}
+	lg.Warn("public_url is https but trusted_proxies is empty: behind a reverse proxy every client shares one rate-limit bucket for login and registration; set trusted_proxies to the proxy's network")
+}
+
 // serveOn serves on ln until ctx is cancelled, then drains requests for up
 // to drain. It owns ln and every resource it opens, and releases them in
 // reverse order of acquisition.
@@ -70,11 +114,17 @@ func serveOn(ctx context.Context, cfg config.Config, ln net.Listener, lg *slog.L
 		return err
 	}
 	defer func() { _ = v.Close() }()
-	store, err := tokens.Open(filepath.Join(cfg.StateDir, "auth.db"))
+	// One connection to auth.db for both token kinds (authdb.Open).
+	db, err := authdb.Open(filepath.Join(cfg.StateDir, "auth.db"))
 	if err != nil {
 		return err
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = db.Close() }()
+	store := tokens.New(db)
+	svc, err := oauthService(cfg, db, lg)
+	if err != nil {
+		return err
+	}
 	wl, err := logs.Open(cfg.StateDir, int64(cfg.Logs.MaxSizeMB)<<20, cfg.Logs.Keep)
 	if err != nil {
 		return err
@@ -91,7 +141,7 @@ func serveOn(ctx context.Context, cfg config.Config, ln net.Listener, lg *slog.L
 	// streams. ReadTimeout is safe because request bodies are capped (about
 	// twice max_write_bytes, see server.New).
 	srv := &http.Server{
-		Handler:           server.New(server.Options{Config: cfg, Vault: v, Tokens: store, Log: wl, Logger: lg}),
+		Handler:           server.New(server.Options{Config: cfg, Vault: v, Tokens: store, OAuth: svc, Log: wl, Logger: lg}),
 		BaseContext:       func(net.Listener) context.Context { return base },
 		ReadHeaderTimeout: 10 * time.Second, // slow-header (Slowloris) protection
 		ReadTimeout:       30 * time.Second,
