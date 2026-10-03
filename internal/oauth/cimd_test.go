@@ -28,7 +28,7 @@ func cimdBody(id, name string, uris ...string) []byte {
 }
 
 func TestCheckCIMDURL(t *testing.T) {
-	for _, ok := range []string{testCIMD, "https://app.example.com:443/c", "https://a.b.example/x/y.json"} {
+	for _, ok := range []string{testCIMD, "https://app.example.com:443/c", "https://a.b.example/x/y.json", "https://dead.beef.example/c"} {
 		if err := checkCIMDURL(ok); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
@@ -37,7 +37,7 @@ func TestCheckCIMDURL(t *testing.T) {
 		"http://app.example.com/c", "https://app.example.com", "https://app.example.com/",
 		"https://app.example.com:8443/c", "https://127.0.0.1/c", "https://[::1]/c", "https://10.0.0.1/c",
 		"https://user@app.example.com/c", "https://app.example.com/c?x=1", "https://app.example.com/c#f",
-		"https://app.example.com/a b", "https://app.example.com/" + strings.Repeat("a", 600), "https:///c",
+		"https://app.example.com/a b", "https://app.example.com/" + strings.Repeat("a", 600), "https:///c", "https://localhost/c", "https://intranet/c", "https://1.2.3.4.5/c", "https://0x7f.1/c", "https://2130706433/c", "https://0x7f000001/c", "https://a.b.0x1/c", "https://a.b.123/c",
 	} {
 		if checkCIMDURL(bad) == nil {
 			t.Errorf("accepted %s", bad)
@@ -94,13 +94,13 @@ func TestBlockedIP(t *testing.T) {
 		"127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0",
 		"0.1.2.3", "224.0.0.1", "255.255.255.255", "198.18.0.1", "192.0.2.1", "::1", "::", "fe80::1",
 		"fc00::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "2002:a00:1::", "2001:db8::1",
-		"2001::1", "ff02::1", "fe80::1%eth0", "::ffff:169.254.169.254", "::ffff:100.64.0.1",
+		"2001::1", "ff02::1", "::7f00:1", "::a9fe:a9fe", "fec0::1", "::ffff:0:7f00:1", "2001:2::1", "2001:10::1", "3fff::1", "5f00::1", "4000::1", "fe80::1%eth0", "::ffff:169.254.169.254", "::ffff:100.64.0.1",
 	} {
 		if !blockedIP(netip.MustParseAddr(s)) {
 			t.Errorf("%s not blocked", s)
 		}
 	}
-	for _, s := range []string{"1.1.1.1", "160.79.104.10", "2606:4700::1111", "8.8.8.8"} {
+	for _, s := range []string{"1.1.1.1", "160.79.104.10", "2606:4700::1111", "2a00:1450:4001::1", "8.8.8.8"} {
 		if blockedIP(netip.MustParseAddr(s)) {
 			t.Errorf("%s blocked", s)
 		}
@@ -285,5 +285,108 @@ func TestResolverBoundsStoredDocuments(t *testing.T) {
 func TestIsCIMDClientID(t *testing.T) {
 	if !isCIMDClientID(testCIMD) || isCIMDClientID("MFRGGZDFMZTWQ2LK") || isCIMDClientID("http://app.example.com/c") {
 		t.Fatal("isCIMDClientID misclassified an id")
+	}
+}
+
+func TestSafeFetcherRefusesLocalhostByName(t *testing.T) {
+	_, err := newSafeFetcher().fetch(context.Background(), "https://localhost/client.json")
+	if err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// grantedResolver returns a resolver holding a fetched, granted CIMD row
+// whose first-time limiter is empty and whose TTL has run out.
+func grantedResolver(t *testing.T) (*cimdResolver, *fakeFetch, *Store, *testClock) {
+	t.Helper()
+	f := &fakeFetch{}
+	f.body.Store(cimdBody(testCIMD, "Old", "http://127.0.0.1/cb"))
+	r, s, clk := newTestResolver(t, f)
+	if _, err := r.resolve(context.Background(), testCIMD); err != nil {
+		t.Fatal(err)
+	}
+	insertGrant(t, s, "F1", testCIMD)
+	r.limit = rate.NewLimiter(0, 0)
+	clk.Advance(cimdTTL + time.Second)
+	return r, f, s, clk
+}
+
+func TestGrantedClientRefetchUsesItsOwnLimiter(t *testing.T) {
+	r, f, _, _ := grantedResolver(t)
+	f.body.Store(cimdBody(testCIMD, "New", "http://127.0.0.1/cb"))
+	row, err := r.resolve(context.Background(), testCIMD)
+	if err != nil || row.Name != "New" {
+		t.Fatalf("refetch with a drained first-time limiter = %+v, %v", row, err)
+	}
+}
+
+func TestGrantedClientServedStaleOnTransportFailure(t *testing.T) {
+	r, f, _, clk := grantedResolver(t)
+	f.err = errors.New("boom")
+	row, err := r.resolve(context.Background(), testCIMD)
+	if err != nil || row.Name != "Old" {
+		t.Fatalf("within 24h = %+v, %v", row, err)
+	}
+	r.refetch = rate.NewLimiter(0, 0)
+	r.failed = map[string]time.Time{}
+	if row, err = r.resolve(context.Background(), testCIMD); err != nil || row.Name != "Old" {
+		t.Fatalf("rate limited = %+v, %v", row, err)
+	}
+	clk.Advance(cimdStaleMax)
+	r.failed = map[string]time.Time{}
+	if _, err = r.resolve(context.Background(), testCIMD); !errors.Is(err, errCIMD) {
+		t.Fatalf("beyond 24h = %v", err)
+	}
+}
+
+func TestUngrantedClientNotServedStale(t *testing.T) {
+	f := &fakeFetch{}
+	f.body.Store(cimdBody(testCIMD, "Old", "http://127.0.0.1/cb"))
+	r, _, clk := newTestResolver(t, f)
+	if _, err := r.resolve(context.Background(), testCIMD); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(cimdTTL + time.Second)
+	f.err = errors.New("boom")
+	if _, err := r.resolve(context.Background(), testCIMD); !errors.Is(err, errCIMD) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestInvalidRefetchedDocumentDropsTheClient(t *testing.T) {
+	r, f, s, _ := grantedResolver(t)
+	f.body.Store(cimdBody(testCIMD, "Evil", "https://evil.example/cb"))
+	if _, err := r.resolve(context.Background(), testCIMD); !errors.Is(err, errCIMD) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := s.clientByID(testCIMD); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("row kept: %v", err)
+	}
+	if n := countRows(t, s, "grants"); n != 0 {
+		t.Fatalf("%d grants kept", n)
+	}
+}
+
+func countRows(t *testing.T, s *Store, table string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestRateLimitLogIsAggregatedAndOmitsIDs(t *testing.T) {
+	var buf strings.Builder
+	f := &fakeFetch{err: errors.New("unreachable")}
+	s, _ := newTestStore(t)
+	r := newCIMDResolver(s, defaultAllowlist(t), f.fetch, slog.New(slog.NewTextHandler(&buf, nil)))
+	r.limit = rate.NewLimiter(0, 0)
+	for i := 0; i < 5; i++ {
+		_, _ = r.resolve(context.Background(), "https://app.example.com/secret"+strconv.Itoa(i)+".json")
+	}
+	out := buf.String()
+	if strings.Contains(out, "secret") || strings.Count(out, "rate limit") != 1 {
+		t.Fatalf("log = %q", out)
 	}
 }

@@ -45,9 +45,11 @@ var errCIMD = errors.New("client metadata document rejected")
 func isCIMDClientID(id string) bool { return strings.HasPrefix(id, "https://") }
 
 // checkCIMDURL accepts only https URLs on port 443 with a DNS name and a
-// path: no IP literal (the dialer would refuse private ones anyway; public
-// literals have no business being client ids), no credentials, query, or
-// fragment. Restricting the port keeps the fetcher from probing services.
+// path: no IP literal in any spelling (netip only parses canonical forms, so
+// the last label must not look numeric either: the resolver would accept
+// 2130706433 or 0x7f.1 as IPv4; the dialer refuses private results anyway),
+// no single-label host, no credentials, query, or fragment. Restricting the
+// port keeps the fetcher from probing services.
 func checkCIMDURL(raw string) error {
 	if len(raw) > maxClientIDBytes || strings.ContainsAny(raw, "#\\ ") {
 		return errCIMD
@@ -63,10 +65,37 @@ func checkCIMDURL(raw string) error {
 	if _, err := netip.ParseAddr(host); err == nil {
 		return errCIMD
 	}
+	labels := strings.Split(strings.TrimSuffix(host, "."), ".")
+	if len(labels) < 2 || numericLabel(labels[len(labels)-1]) {
+		return errCIMD
+	}
 	if u.Path == "" || u.Path == "/" {
 		return errCIMD
 	}
 	return nil
+}
+
+// numericLabel reports whether a label is all digits or a 0x hex number, the
+// forms legacy resolvers read as an IPv4 component.
+func numericLabel(l string) bool {
+	if l == "" {
+		return true
+	}
+	if len(l) > 2 && (l[:2] == "0x" || l[:2] == "0X") {
+		l = l[2:]
+		for _, r := range l {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, r := range l {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 type cimdDoc struct {
@@ -114,15 +143,26 @@ var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64
 	netip.MustParsePrefix("100::/64"),        // discard
 	netip.MustParsePrefix("2001::/32"),       // Teredo: embeds IPv4
+	netip.MustParsePrefix("2001:2::/48"),     // benchmarking
+	netip.MustParsePrefix("2001:10::/28"),    // deprecated ORCHID
+	netip.MustParsePrefix("3fff::/20"),       // documentation
 	netip.MustParsePrefix("2001:db8::/32"),   // documentation
 	netip.MustParsePrefix("2002::/16"),       // 6to4: embeds IPv4
 }
+
+// globalUnicast6 is the only IPv6 space the fetcher may reach. Everything
+// else (::/8 IPv4-compatible forms such as ::7f00:1, fec0::/10 site-local,
+// the unallocated rest) is refused rather than enumerated.
+var globalUnicast6 = netip.MustParsePrefix("2000::/3")
 
 // blockedIP reports whether the fetcher must not connect to ip.
 func blockedIP(ip netip.Addr) bool {
 	ip = ip.Unmap().WithZone("")
 	if !ip.IsValid() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if ip.Is6() && !globalUnicast6.Contains(ip) {
 		return true
 	}
 	for _, p := range blockedPrefixes {
@@ -212,13 +252,24 @@ type cimdResolver struct {
 	store     *Store
 	allow     allowlist
 	fetch     func(context.Context, string) ([]byte, error)
-	limit     *rate.Limiter
+	limit     *rate.Limiter // first-time fetches, driven by anonymous /authorize requests
+	refetch   *rate.Limiter // refreshes of clients we already hold, kept apart so flooding cannot starve them
 	logger    *slog.Logger
 	maxStored int
 
-	mu     sync.Mutex
-	failed map[string]time.Time // client_id -> when the failure expires
+	mu          sync.Mutex
+	failed      map[string]time.Time // client_id -> when the failure expires
+	limitLogged time.Time
+	limitHits   int
 }
+
+// cimdStaleMax is how long past its fetch time a connected client's cached
+// document is still served when the document host cannot be reached. A
+// transient outage (or an attacker exhausting the shared fetch budget) must
+// not lock out a client the owner already approved; but a document that was
+// fetched and found invalid revokes the client at once, and after a day of
+// silence the cache stops vouching for it.
+const cimdStaleMax = 24 * time.Hour
 
 // newCIMDResolver limits cache misses to 10 a minute: /authorize is
 // unauthenticated, so without a limit anyone could make the server fetch
@@ -227,6 +278,7 @@ func newCIMDResolver(store *Store, allow allowlist, fetch func(context.Context, 
 	return &cimdResolver{
 		store: store, allow: allow, fetch: fetch, logger: logger,
 		limit:     rate.NewLimiter(rate.Every(6*time.Second), 10),
+		refetch:   rate.NewLimiter(rate.Every(2*time.Second), 20),
 		maxStored: cimdMaxStored,
 		failed:    map[string]time.Time{},
 	}
@@ -273,12 +325,34 @@ func (s *Store) makeRoomCIMD(id string, max int) error {
 	return err
 }
 
+// logRateLimited logs at most once a minute, with the number of refusals
+// since the last line and never a client id (an attacker chooses them).
+func (c *cimdResolver) logRateLimited() {
+	now := c.store.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.limitHits++
+	if now.Sub(c.limitLogged) < time.Minute {
+		return
+	}
+	c.limitLogged = now
+	c.logger.Warn("client metadata fetch rate limit reached", "refused", c.limitHits)
+	c.limitHits = 0
+}
+
+func (s *Store) hasGrant(id string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM grants WHERE client_id = ?`, id).Scan(&n)
+	return n > 0, err
+}
+
 func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error) {
 	row, err := c.store.clientByID(id)
+	known := err == nil
 	switch {
-	case err == nil && row.Kind != kindCIMD:
+	case known && row.Kind != kindCIMD:
 		return clientRow{}, ErrNotFound
-	case err == nil && c.store.now().Sub(row.Fetched) < cimdTTL:
+	case known && c.store.now().Sub(row.Fetched) < cimdTTL:
 		return row, nil
 	case err != nil && !errors.Is(err, ErrNotFound):
 		return clientRow{}, err
@@ -286,12 +360,26 @@ func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error
 	if err := checkCIMDURL(id); err != nil {
 		return clientRow{}, err
 	}
-	if c.recentlyFailed(id) {
+	// unreachable is a transport-level failure: the document was not seen,
+	// so a connected client keeps working from its stale row for a while.
+	unreachable := func() (clientRow, error) {
+		if known && c.store.now().Sub(row.Fetched) < cimdStaleMax {
+			if ok, err := c.store.hasGrant(id); err == nil && ok {
+				return row, nil
+			}
+		}
 		return clientRow{}, errCIMD
 	}
-	if !c.limit.Allow() {
-		c.logger.Warn("client metadata fetch rate limit reached", "client_id", id)
-		return clientRow{}, errCIMD
+	if c.recentlyFailed(id) {
+		return unreachable()
+	}
+	lim := c.limit
+	if known {
+		lim = c.refetch
+	}
+	if !lim.Allow() {
+		c.logRateLimited()
+		return unreachable()
 	}
 	ctx, cancel := context.WithTimeout(ctx, cimdTimeout)
 	defer cancel()
@@ -299,18 +387,28 @@ func (c *cimdResolver) resolve(ctx context.Context, id string) (clientRow, error
 	if err != nil {
 		c.logger.Warn("client metadata fetch failed", "client_id", id, "err", err)
 		c.recordFailure(id)
-		return clientRow{}, errCIMD
+		return unreachable()
 	}
 	fresh, err := parseCIMD(id, body, c.allow)
 	if err != nil {
 		c.logger.Warn("client metadata document rejected", "client_id", id, "err", err)
 		c.recordFailure(id)
+		if known {
+			// The host answered and the document is no longer acceptable:
+			// drop the client and every grant it holds.
+			if rerr := c.store.RevokeClient(id); rerr != nil && !errors.Is(rerr, ErrNotFound) {
+				return clientRow{}, rerr
+			}
+		}
 		return clientRow{}, errCIMD
 	}
 	now := c.store.now()
-	fresh.Created, fresh.Fetched = now, now
-	if err := c.store.makeRoomCIMD(id, c.maxStored); err != nil {
-		return clientRow{}, err
+	fresh.Created, fresh.Fetched = row.Created, now
+	if !known {
+		fresh.Created = now
+		if err := c.store.makeRoomCIMD(id, c.maxStored); err != nil {
+			return clientRow{}, err
+		}
 	}
 	if err := c.store.saveCIMD(fresh); err != nil {
 		return clientRow{}, err
