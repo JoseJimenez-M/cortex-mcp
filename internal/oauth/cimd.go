@@ -227,12 +227,12 @@ func newSafeFetcher() *fetcher {
 }
 
 func (f *fetcher) fetch(ctx context.Context, rawURL string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil) // #nosec G107 -- the URL passed checkCIMDURL and the dialer refuses non-public addresses
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil) // #nosec G107 G704 -- the URL passed checkCIMDURL and the dialer refuses non-public addresses
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := f.client.Do(req)
+	resp, err := f.client.Do(req) // #nosec G704 -- the URL passed checkCIMDURL and safeDialControl refuses non-public addresses
 	if err != nil {
 		return nil, fmt.Errorf("fetch client metadata: %w", err)
 	}

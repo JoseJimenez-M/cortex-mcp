@@ -66,6 +66,9 @@ hand the vault to anyone on the internet. Read the root `AGENTS.md` first, then 
    (S256 enforcement relies on it). `ErrInvalidRequestRedirectURI` is flagged redirect-disabled and is
    rendered as an error page; the allowlist re-check in `CreateAuthRequest` relies on it, and runs
    before the PKCE check so no error is ever redirected to an unvetted URI.
+   The library validates prompt and response_type only after accepting a native client's loopback URI
+   loosely (userinfo, any loopback IP, https), and redirects those errors; `Service.preCheck` therefore
+   resolves the client and applies the allowlist before the library runs.
 2. The provider decodes `/authorize` parameters from `r.Form` after our wrapper parsed it (the default
    scope relies on it).
 3. `op.WithCORSOptions(nil)` disables CORS entirely.

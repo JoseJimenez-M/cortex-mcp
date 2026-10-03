@@ -21,8 +21,6 @@ func oauthError(w http.ResponseWriter, status int, code, desc string) {
 // be cached (RFC 6749 section 5.1); no page may be framed (clickjacking on
 // the login page); the referrer must not carry auth request ids elsewhere.
 // HTML pages replace the CSP with a nonce-based one (pages.go).
-//
-//lint:ignore U1000 -- mounted by Service.Register in a later task (service.go)
 func secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()

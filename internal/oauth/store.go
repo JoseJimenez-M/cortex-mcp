@@ -78,7 +78,6 @@ func hashToken(s string) []byte {
 	return sum[:]
 }
 
-//lint:ignore U1000 -- used by browser binding in a later task
 func hashHex(s string) string { return hex.EncodeToString(hashToken(s)) }
 
 // randBytes returns n random bytes. crypto/rand.Read never fails since Go
