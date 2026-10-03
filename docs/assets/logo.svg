@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">cortex-mcp</title>
+  <desc id="desc">A ring of connected nodes, open like the letter C, around a Markdown note: assistants connected to one vault.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1B1F2E"/>
+      <stop offset="1" stop-color="#0E1018"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F0A27C"/>
+      <stop offset="1" stop-color="#D97757"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+  <!-- open ring: arc from 50 deg to 310 deg, radius 82 around (128,128) -->
+  <path d="M 180.7 65.2 A 82 82 0 1 0 180.7 190.8" fill="none" stroke="url(#ring)" stroke-width="7" stroke-linecap="round" opacity="0.9"/>
+  <!-- spokes from nodes to the note -->
+  <g stroke="#D97757" stroke-width="3" stroke-linecap="round" opacity="0.45">
+    <line x1="128" y1="46" x2="128" y2="92"/>
+    <line x1="59" y1="84" x2="98" y2="106"/>
+    <line x1="46" y1="128" x2="96" y2="128"/>
+    <line x1="59" y1="172" x2="98" y2="150"/>
+    <line x1="128" y1="210" x2="128" y2="164"/>
+  </g>
+  <!-- nodes on the ring -->
+  <g fill="#F4B393" stroke="#0E1018" stroke-width="4">
+    <circle cx="180.7" cy="65.2" r="11"/>
+    <circle cx="128" cy="46" r="11"/>
+    <circle cx="59" cy="84" r="11"/>
+    <circle cx="46" cy="128" r="11"/>
+    <circle cx="59" cy="172" r="11"/>
+    <circle cx="128" cy="210" r="11"/>
+    <circle cx="180.7" cy="190.8" r="11"/>
+  </g>
+  <!-- the note (vault) -->
+  <path d="M 96 92 H 146 L 166 112 V 164 H 96 Z" fill="#F7F3EE"/>
+  <path d="M 146 92 V 112 H 166" fill="#E3D9CE"/>
+  <g stroke="#D97757" stroke-width="3.5" stroke-linecap="round">
+    <line x1="106" y1="118.5" x2="120" y2="118.5"/>
+    <line x1="105" y1="127.5" x2="119" y2="127.5"/>
+    <line x1="111" y1="112" x2="109" y2="134"/>
+    <line x1="117" y1="112" x2="115" y2="134"/>
+  </g>
+  <g stroke="#9AA3B8" stroke-width="5" stroke-linecap="round">
+    <line x1="126" y1="123" x2="154" y2="123"/>
+    <line x1="108" y1="142" x2="154" y2="142"/>
+    <line x1="108" y1="153" x2="140" y2="153"/>
+  </g>
+</svg>

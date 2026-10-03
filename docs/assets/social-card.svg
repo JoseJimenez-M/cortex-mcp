@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-labelledby="t">
+  <title id="t">cortex-mcp: one Markdown vault, every AI assistant</title>
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1B1F2E"/>
+      <stop offset="1" stop-color="#0E1018"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg2)"/>
+  <text x="470" y="270" font-family="Inter, 'Segoe UI', 'DejaVu Sans', sans-serif" font-size="78" font-weight="700" fill="#F7F3EE">cortex-mcp</text>
+  <text x="472" y="335" font-family="Inter, 'Segoe UI', 'DejaVu Sans', sans-serif" font-size="34" fill="#F0A27C">One Markdown vault. Every AI assistant.</text>
+  <text x="472" y="400" font-family="Inter, 'Segoe UI', 'DejaVu Sans', sans-serif" font-size="26" fill="#9AA3B8">Self-hosted MCP server in Go · OAuth 2.1 + passkeys</text>
+  <text x="472" y="440" font-family="Inter, 'Segoe UI', 'DejaVu Sans', sans-serif" font-size="26" fill="#9AA3B8">Claude · ChatGPT · Meta Muse · Obsidian</text>
+  <!-- logo.svg composited at x=110 y=170, 300x300 when rendering social-card.png -->
+</svg>
