@@ -56,7 +56,7 @@ func TestRateLimitRefusalIsLoggedOncePerMinute(t *testing.T) {
 		t.Fatalf("after a minute: %v, want a second record counting the 2 unlogged refusals", got)
 	}
 	if strings.Contains(buf.String(), e.secret) || strings.Contains(buf.String(), "Bearer") {
-		t.Fatalf("log leaks a secret:\n%s", buf.String())
+		t.Fatal("log leaks the token or the Authorization scheme") // never print the buffer: it would hold the secret
 	}
 }
 
