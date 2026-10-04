@@ -38,7 +38,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != "127.0.0.1:8080" || !c.BearerTokens || c.Limits.MaxWriteBytes != 1<<20 || c.Limits.RequestsPerMinute != 60 || c.Logs.MaxSizeMB != 5 || c.Logs.Keep != 3 {
+	if c.Listen != "127.0.0.1:8080" || !c.BearerTokens || c.Limits.MaxWriteBytes != 1<<20 || c.Limits.RequestsPerMinute != 180 || c.Limits.MaxSessionsPerClient != 200 || c.Logs.MaxSizeMB != 5 || c.Logs.Keep != 3 {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
 }
@@ -208,6 +208,8 @@ func TestValidateErrors(t *testing.T) {
 		"write over 8MiB":        {func(c *Config) { c.Limits.MaxWriteBytes = 8<<20 + 1 }, "limits.max_write_bytes:"},
 		"rpm zero":               {func(c *Config) { c.Limits.RequestsPerMinute = 0 }, "limits.requests_per_minute:"},
 		"rpm over":               {func(c *Config) { c.Limits.RequestsPerMinute = 6001 }, "limits.requests_per_minute:"},
+		"sessions zero":          {func(c *Config) { c.Limits.MaxSessionsPerClient = 0 }, "limits.max_sessions_per_client:"},
+		"sessions over":          {func(c *Config) { c.Limits.MaxSessionsPerClient = 2001 }, "limits.max_sessions_per_client:"},
 		"size zero":              {func(c *Config) { c.Logs.MaxSizeMB = 0 }, "logs.max_size_mb:"},
 		"size over":              {func(c *Config) { c.Logs.MaxSizeMB = 1025 }, "logs.max_size_mb:"},
 		"keep zero":              {func(c *Config) { c.Logs.Keep = 0 }, "logs.keep:"},
@@ -226,7 +228,7 @@ func TestValidateErrors(t *testing.T) {
 
 func TestValidateBoundsInclusive(t *testing.T) {
 	c := valid()
-	c.Limits = Limits{MaxWriteBytes: 8 << 20, RequestsPerMinute: 6000}
+	c.Limits = Limits{MaxWriteBytes: 8 << 20, RequestsPerMinute: 6000, MaxSessionsPerClient: 2000}
 	c.Logs = Logs{MaxSizeMB: 1024, Keep: 100}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("upper bounds rejected: %v", err)

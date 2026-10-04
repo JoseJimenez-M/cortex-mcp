@@ -93,7 +93,8 @@ func New(o Options) http.Handler {
 		idle = idleSessionTimeout
 	}
 	cache := &serverCache{o: o}
-	sessions := newSessionLimiter(maxSessionsPerClient)
+	refused := newRefusalLog(o.Logger, o.Now)
+	sessions := newSessionLimiter(o.Config.Limits.MaxSessionsPerClient, refused)
 	mcpHandler := mcp.NewStreamableHTTPHandler(sessions.servers(cache.get), &mcp.StreamableHTTPOptions{
 		MaxRequestBodyBytes:        escapeFactor*o.Config.Limits.MaxWriteBytes + envelopeBytes,
 		DisableLocalhostProtection: !isLocalURL(o.Config.PublicURL),
@@ -115,7 +116,7 @@ func New(o Options) http.Handler {
 
 	// Rate limit before the session cap, so refused session attempts still
 	// spend the client's budget.
-	mux.Handle("/mcp", noStore(requireToken(rateLimit(o.Config.Limits.RequestsPerMinute, sessions.limit(mcpHandler)))))
+	mux.Handle("/mcp", noStore(requireToken(rateLimit(o.Config.Limits.RequestsPerMinute, refused, sessions.limit(mcpHandler)))))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
@@ -307,15 +308,19 @@ func rateKey(r *http.Request) string {
 	return key
 }
 
+// rateRetryAfter is the Retry-After, in seconds, on a rate-limited request.
+const rateRetryAfter = "10"
+
 // rateLimit allows perMinute requests per authenticated client, with a burst
-// of a sixth of that (10 at the default 60), enough for an MCP handshake plus
-// a call. It runs after auth, so unauthenticated traffic never creates a
+// of a sixth of that (30 at the default 180): a client that opens a session
+// per tool call spends about four requests on each (initialize, initialized,
+// tools/list, the call) and may run calls in parallel. It runs after auth, so unauthenticated traffic never creates a
 // limiter: the map is keyed by Extra["ratekey"], the Bearer token name (so a
 // token re-created under the same name keeps the old budget) or the OAuth
 // grant family. It is bounded by the names ever issued plus the grants ever
 // approved, and every grant needs the owner's login, so no eviction is
 // needed. If tokens or grants ever become self-service, add eviction here.
-func rateLimit(perMinute int, next http.Handler) http.Handler {
+func rateLimit(perMinute int, refused *refusalLog, next http.Handler) http.Handler {
 	var mu sync.Mutex
 	limiters := map[string]*rate.Limiter{}
 	burst := max(1, perMinute/6)
@@ -333,7 +338,8 @@ func rateLimit(perMinute int, next http.Handler) http.Handler {
 		}
 		mu.Unlock()
 		if !l.Allow() {
-			w.Header().Set("Retry-After", "10")
+			refused.note(r, "rate", rateRetryAfter)
+			w.Header().Set("Retry-After", rateRetryAfter)
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}

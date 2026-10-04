@@ -401,7 +401,7 @@ func TestOAuthClientsWithTheSameNameHaveSeparateSessionCaps(t *testing.T) {
 	a, _ := e.grant(t, e.registerClient(t))
 	b, _ := e.grant(t, e.registerClient(t))
 	raw := env{url: e.url}
-	for i := 0; i < maxSessionsPerClient; i++ {
+	for i := 0; i < testCap; i++ {
 		if code, _, _, _ := rawInit(t, raw, a); code != http.StatusOK {
 			t.Fatalf("session %d: %d", i, code)
 		}
