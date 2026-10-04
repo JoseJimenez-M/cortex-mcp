@@ -33,7 +33,8 @@ The `-config path` flag of every command, else the `CORTEX_MCP_CONFIG` environme
 | `oauth.enabled` | `true` | |
 | `oauth.redirect_allowlist` | five entries (below) | 1 to 32 entries while OAuth is on |
 | `limits.max_write_bytes` | `1048576` | 1 to 8388608 |
-| `limits.requests_per_minute` | `60` | 1 to 6000 |
+| `limits.requests_per_minute` | `180` | 1 to 6000 |
+| `limits.max_sessions_per_client` | `200` | 1 to 2000 |
 | `logs.max_size_mb` | `5` | 1 to 1024 |
 | `logs.keep` | `3` | 1 to 100 |
 
@@ -110,7 +111,9 @@ valid UTF-8, relative (no leading `/`), free of `..` segments, control and forma
 backslashes, without a path segment that starts or ends with whitespace, and must not name the vault
 root itself (for example `.` or `./`). Matching ignores case, segment by segment.
 
-Always protected, at any depth, whatever `deny` says: `.git`, `.obsidian`, and `.cortex-mcp`. `.trash`
+Always protected, at any depth, whatever `deny` says: `.git`, `.obsidian`, `.cortex-mcp`, and Syncthing's `.stversions` and `.stfolder` (old copies of notes kept by
+Syncthing's file versioning, which searches would mix with the current notes, and which Syncthing
+never syncs back). `.trash`
 is receive-only: `delete_note` moves notes there, and notes can be read and moved out, but nothing else
 writes there. An entry also protects the same path below `.trash/`, because `delete_note` keeps the
 folder path there. Obsidian's own trash flattens paths, which no entry can match: if you use `deny`,
@@ -174,9 +177,19 @@ The largest content one write may carry, in bytes. Default `1048576` (1 MiB); fr
 
 #### `limits.requests_per_minute`
 
-Requests to `/mcp` per minute for each client: per Bearer token, or per OAuth connection. Default `60`;
-from 1 to 6000. A short burst of a sixth of the value (10 at the default) is allowed, enough for a
-connection handshake plus a call.
+Requests to `/mcp` per minute for each client: per Bearer token, or per OAuth connection. Default `180`;
+from 1 to 6000. A short burst of a sixth of the value (30 at the default) is allowed. Some hosted
+assistants (ChatGPT, Meta Muse) open a new session for each tool call, which costs about four requests
+(initialize, initialized, tools/list, the call), and may run calls in parallel.
+
+#### `limits.max_sessions_per_client`
+
+Live MCP sessions each client may hold: per Bearer token, or per OAuth connection. Default `200`; from 1
+to 2000. A request that would open one more gets `429` with `Retry-After: 60`, and open sessions keep
+working. A session ends when the client sends `DELETE` or after 30 minutes without a request. Clients
+that reuse their session hold 1 or 2; a client that opens a session per tool call and never ends it
+holds one per call for 30 minutes, so for it this is the number of calls per 30 minutes. An idle session
+uses about 25 KiB of memory.
 
 ### `logs`
 

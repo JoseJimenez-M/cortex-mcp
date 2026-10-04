@@ -169,7 +169,7 @@ The server is internet-facing and has write access to private notes, so security
 features.
 
 - All file access is confined to the vault through `os.Root`; symbolic links are never followed;
-  `.git`, `.obsidian`, and `.cortex-mcp` are off limits, and `.trash` is receive-only.
+  `.git`, `.obsidian`, `.cortex-mcp`, `.stversions`, and `.stfolder` are off limits, and `.trash` is receive-only.
 - Tool code runs no shell, no git, and no network calls. The server's only outbound request fetches
   OAuth client metadata documents, never from private or loopback addresses.
 - Every route except `GET /healthz` and the OAuth endpoints needs a token. OAuth follows the MCP

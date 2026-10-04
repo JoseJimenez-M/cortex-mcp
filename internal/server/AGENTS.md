@@ -24,12 +24,14 @@ root `AGENTS.md` first.*
   the rate limit or the cap on an OAuth client name: registrations choose it freely and two may share
   one. Tokens are routed by shape (`tokens.IsBearer`) in `tokenVerifier`, never tried against both
   stores; with `bearer_tokens: false` every `cmcp_` token gets `401`.
-- **Live sessions per token are capped at `maxSessionsPerClient` (16)** in `sessions.go`. A POST without
+- **Live sessions per token are capped at `limits.max_sessions_per_client`** (default 200) in `sessions.go`. A POST without
   `Mcp-Session-Id` reserves a slot or gets `429` with `Retry-After`; requests on existing sessions are
   never refused by the cap. The slot is released when `ServerSession.Wait` returns, which covers DELETE,
   the idle timeout and failed initialization. Any new path that creates sessions must go through
   `sessionLimiter`, and the SDK must only ever get the server factory wrapped by
   `sessionLimiter.servers`, or slots are released early.
+- **Every `429` from `/mcp` goes through `refusalLog.note`** (`refusals.go`): one `request refused`
+  warning per client and limit per minute, with the client name only.
 - **`DisableLocalhostProtection`** is only set when `public_url` is not localhost (behind a reverse
   proxy, where every request is authenticated anyway). Do not disable it for local URLs.
 - **Instructions:** `DefaultInstructions` always comes first; the vault's own file is appended, never
