@@ -19,6 +19,7 @@ func fixture(t *testing.T) (*Vault, string) {
 	writeFile(t, dir, "Lib/c.txt", "Go text file")
 	writeFile(t, dir, "Lib/d.md", "[[b|alias]] mention of go\n")
 	writeFile(t, dir, ".obsidian/x.md", "Go hidden")
+	writeFile(t, dir, ".stversions/a~20261004-120000.md", "Go old copy [[Lib/b]] #idea")
 	writeFile(t, dir, ".trash/old.md", "Go trashed [[Lib/b]]")
 	writeFile(t, dir, "Private/p.md", "Go private")
 	return v, dir
