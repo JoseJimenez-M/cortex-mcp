@@ -33,7 +33,8 @@ authenticator, and a malicious operator. Those already have the vault.
 - All file access goes through `os.Root` in `internal/vault`; every path is cleaned and confined to the
   vault. The vault never follows symbolic links: a path that is or passes through one is refused. Paths
   over 1024 bytes, or with a segment over 255 bytes, are refused.
-- `.git`, `.obsidian`, and `.cortex-mcp` are off limits at any depth. `.trash` is receive-only
+- `.git`, `.obsidian`, `.cortex-mcp`, and Syncthing's `.stversions` and `.stfolder` are off limits at
+  any depth. `.trash` is receive-only
   (`delete_note` writes there; reads and moves out are allowed). `deny` adds more, and each entry also
   protects the same path below `.trash/` (`delete_note` keeps the folder path). Obsidian's own trash
   flattens paths, which no entry can match: if you use `deny`, consider adding `.trash` to it.
@@ -57,9 +58,13 @@ authenticator, and a malicious operator. Those already have the vault.
 - An MCP session is bound to the credential that opened it: a Bearer token's row (after `token revoke`,
   a new token created with the same name cannot use the old token's sessions) or an OAuth connection
   (stable across refreshes, so a session survives token rotation).
-- Each token can hold at most 16 live sessions (normal clients use 1 or 2). Opening one more gets
-  `429 Too Many Requests` with `Retry-After`; a slot frees when a client ends its session or the
-  session times out. Sessions with no client POST for 30 minutes are closed.
+- Each token can hold at most `limits.max_sessions_per_client` live sessions (default 200; clients
+  that reuse a session use 1 or 2, clients that open one per tool call use one per call). Opening one
+  more gets `429 Too Many Requests` with `Retry-After`; a slot frees when a client ends its session or
+  the session times out. Sessions with no client POST for 30 minutes are closed.
+- Every `429` from `/mcp` is logged as `request refused`, with the limit (`rate` or `sessions`) and the
+  client name, at most once per client and limit per minute (the next line counts the ones left out).
+  The token and the `Authorization` header are never logged.
 
 ### OAuth
 

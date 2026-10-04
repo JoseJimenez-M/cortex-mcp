@@ -46,8 +46,8 @@ trusted_proxies: []
 
 # Extra vault-relative files or folders no tool may read or write.
 # Entries must be non-empty, relative, free of ".." and control characters,
-# and not the vault root. .git, .obsidian, and .cortex-mcp are always
-# protected (at any depth), and .trash is receive-only; none of that is configurable.
+# and not the vault root. .git, .obsidian, .cortex-mcp, and Syncthing's
+# .stversions and .stfolder are always protected (at any depth), and .trash is receive-only; none of that is configurable.
 # An entry also protects the same path below .trash/ (delete_note keeps the
 # folder path there). Obsidian's own trash flattens paths, which no entry can
 # match: with deny entries, consider adding .trash to deny as well.
@@ -77,7 +77,8 @@ oauth:
 
 limits:
   max_write_bytes: 1048576    # per write, 1 to 8388608 (8 MiB, the largest note the vault reads)
-  requests_per_minute: 60     # per client, 1 to 6000
+  requests_per_minute: 180    # per client, 1 to 6000; burst of a sixth (30)
+  max_sessions_per_client: 200  # live MCP sessions per client, 1 to 2000
 
 logs:                         # rotation of state_dir/writes.log
   max_size_mb: 5              # 1 to 1024

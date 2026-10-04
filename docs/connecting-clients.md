@@ -95,6 +95,10 @@ for more, the values are: client secret empty (it is a public client using PKCE)
 - `/register` needs `Content-Type: application/json` and is rate limited per source address (5, then 1
   every 6 minutes). The redirect URI must be on `oauth.redirect_allowlist`; the Muse callback is there
   by default.
+- Muse may open a new MCP session for each tool call and run calls in parallel. The defaults
+  (`limits.requests_per_minute: 180`, `limits.max_sessions_per_client: 200`) allow for that. If Muse
+  reports a rate limit, the server log has a `request refused` line saying which limit it hit; see
+  [configuration](configuration.md).
 
 ## Other MCP clients
 

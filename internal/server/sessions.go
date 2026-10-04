@@ -9,14 +9,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// maxSessionsPerClient caps the live MCP sessions one token can hold. Each
-// session pins memory (SDK state, a goroutine set, buffered streams) until
-// DELETE or the idle timeout, and the VPS is small and shared; without a cap
-// a token within its rate limit could hold about 1,800 sessions (60 a minute
-// for 30 idle minutes). Normal clients use 1-2, so 16 leaves room for
-// restarts and several assistants sharing one token.
-const maxSessionsPerClient = 16
-
 // sessionRetryAfter is the Retry-After, in seconds, on a refused session. A
 // slot frees as soon as a client sends DELETE, or after the idle timeout.
 const sessionRetryAfter = "60"
@@ -36,14 +28,22 @@ const sessionIDHeader = "Mcp-Session-Id"
 // ServerSession.Wait returns: Wait ends however the session ends (DELETE,
 // idle timeout, failed initialization). A request that leaves no live session
 // releases its slot at once. Counts live in memory and end with the process.
+//
+// The cap (limits.max_sessions_per_client) exists because each session pins
+// memory (SDK state, a goroutine set, buffered streams) until DELETE or the
+// idle timeout, and the VPS is small and shared. An idle session measured
+// about 25 KiB. Clients that reuse a session hold 1 or 2; hosted assistants
+// that open one per tool call and never send DELETE hold one per call for the
+// whole idle timeout, which is why the default is far above 2.
 type sessionLimiter struct {
-	max  int
-	mu   sync.Mutex
-	live map[string]int // token row id -> live sessions; zero entries removed
+	max     int
+	refused *refusalLog
+	mu      sync.Mutex
+	live    map[string]int // token row id -> live sessions; zero entries removed
 }
 
-func newSessionLimiter(limit int) *sessionLimiter {
-	return &sessionLimiter{max: limit, live: map[string]int{}}
+func newSessionLimiter(limit int, refused *refusalLog) *sessionLimiter {
+	return &sessionLimiter{max: limit, refused: refused, live: map[string]int{}}
 }
 
 type newSessionKey struct{}
@@ -100,6 +100,7 @@ func (l *sessionLimiter) limit(next http.Handler) http.Handler {
 		}
 		key := ti.UserID
 		if !l.acquire(key) {
+			l.refused.note(r, "sessions", sessionRetryAfter)
 			w.Header().Set("Retry-After", sessionRetryAfter)
 			http.Error(w, "too many sessions", http.StatusTooManyRequests)
 			return

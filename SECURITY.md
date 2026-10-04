@@ -36,7 +36,7 @@ Before version 1.0.0, fixes ship only in a new release; there are no backports.
 In scope:
 
 - Anything that lets a client read or write outside the vault, reach a protected path (`.git`,
-  `.obsidian`, `.cortex-mcp`, or a `deny` entry), change the instructions file, or delete a note for
+  `.obsidian`, `.cortex-mcp`, `.stversions`, `.stfolder`, or a `deny` entry), change the instructions file, or delete a note for
   good.
 - Authentication and authorization flaws: Bearer tokens, the OAuth 2.1 server (PKCE, the resource
   binding, the redirect allowlist, refresh token rotation, client registration, client metadata

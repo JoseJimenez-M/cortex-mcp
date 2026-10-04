@@ -116,9 +116,10 @@ reads (prompt injection). Every write tool is either additive or reversible from
 
 Sessions that receive no client POST for 30 minutes are closed (the SDK's session timeout counts POST
 requests), so clients that disappear without ending their session do not pin memory on the shared VPS.
-Each token holds at most 16 live sessions: a request that would open one more gets `429` with
-`Retry-After`, and existing sessions keep working. Without the cap a token within its rate limit could
-hold about 1,800 sessions (60 a minute for 30 minutes); normal clients use 1 or 2. A slot frees when the
+Each token holds at most `limits.max_sessions_per_client` live sessions (default 200): a request that
+would open one more gets `429` with `Retry-After`, and existing sessions keep working. Clients that
+reuse a session use 1 or 2; hosted assistants that open a session per tool call and never end it use
+one per call for the whole idle timeout (decision of 2026-10-04, section 6.7). A slot frees when the
 session ends (DELETE, idle timeout, or failed initialization).
 On shutdown the server cancels every request context, so open event streams end at once instead of
 holding the drain.
@@ -148,6 +149,7 @@ it could rewrite the rules every other assistant receives. The owner edits it ou
    a second line of defence that refuses any path resolving outside the vault. Paths over 1024 bytes,
    or with a segment over 255 bytes, are refused with `invalid_path` before any other work.
 2. **Protected paths.** Fixed and not configurable off: `.git/`, `.obsidian/`, `.cortex-mcp/`,
+   Syncthing's `.stversions/` and `.stfolder/` (section 6.7),
    `.trash/` (receive-only through `delete_note`; readable, movable out). Operators can add more with
    `deny`; an entry also matches the same path below `.trash/`, because `delete_note` keeps the folder
    path there. Obsidian's own trash flattens paths, which no entry can match, so operators with `deny`
@@ -351,6 +353,27 @@ Recorded so they are not re-derived. Each has tests in `internal/oauth`, `intern
 - **Passkeys and IP hosts.** WebAuthn needs a DNS name as relying party id; with an IP in `public_url`
   the server logs a warning and runs with TOTP and recovery codes only.
 
+### 6.7 Decisions taken on 2026-10-04 (owner)
+Taken after Meta Muse, connected over OAuth, got `429` in normal use.
+
+- **Hosted assistants may open a session per tool call.** ChatGPT does (public reports), and Meta Muse
+  behaved as if it did: it runs calls in parallel and hit the limits within a few calls. Such a client
+  spends about four requests per call and holds one session per call until the 30-minute idle timeout.
+  The old limits (60 requests a minute with a burst of 10, 16 sessions per token) therefore allowed
+  about 16 calls per 30 minutes and two or three calls in a row.
+- **New defaults: 180 requests a minute (burst 30) and 200 sessions per client, the cap now a config
+  key** (`limits.max_sessions_per_client`, 1 to 2000). An idle session measured about 25 KiB, so 200
+  sessions cost about 5 MiB and the 2000 ceiling stays under 100 MiB. Closing a client's oldest session
+  at the cap, instead of refusing the new one, was considered and left out until the logs show the cap
+  being hit.
+- **Every `429` on `/mcp` is logged** (`request refused`, the limit, the client name), at most once per
+  client and limit per minute. Before this there was no record of which limit a client hit.
+- **Syncthing's `.stversions/` and `.stfolder/` are always protected.** A vault synced with Syncthing's
+  file versioning keeps old copies of notes in `.stversions/`: searches returned them next to the
+  current notes, and an edit there would be lost without notice because Syncthing never syncs that
+  folder. `deny` could cover it, but an operator who forgets the entry (as happened) exposes the copies,
+  so the names join the fixed list.
+
 ## 7. Configuration
 
 One YAML file, every field documented, sensible defaults:
@@ -369,7 +392,8 @@ oauth:
 trusted_proxies: []                 # reverse proxy networks whose X-Forwarded-For is believed
 limits:
   max_write_bytes: 1048576
-  requests_per_minute: 60
+  requests_per_minute: 180
+  max_sessions_per_client: 200
 logs:
   max_size_mb: 5
   keep: 3
@@ -377,7 +401,7 @@ logs:
 
 `serve` logs a warning when `public_url` is https and `listen` is not a loopback address: the plain
 HTTP port would then be reachable without the TLS proxy. Invalid config fails fast at startup with a clear message; numeric limits have upper caps (write size 8 MiB,
-6000 requests per minute, log size 1024 MB, 100 kept files). No config value is ever secret: secrets
+6000 requests per minute, 2000 sessions per client, log size 1024 MB, 100 kept files). No config value is ever secret: secrets
 live only in the auth state.
 
 ## 8. Logs

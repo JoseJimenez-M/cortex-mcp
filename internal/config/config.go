@@ -30,9 +30,12 @@ import (
 const (
 	maxWriteBytesCap = 8 << 20
 	maxRPMCap        = 6000
-	maxLogSizeMBCap  = 1024
-	maxLogKeepCap    = 100
-	maxConfigBytes   = 1 << 20
+	// maxSessionsCap bounds memory: an idle session measured about 25 KiB,
+	// so 2000 sessions stay well under 100 MiB.
+	maxSessionsCap  = 2000
+	maxLogSizeMBCap = 1024
+	maxLogKeepCap   = 100
+	maxConfigBytes  = 1 << 20
 
 	maxRedirectEntries    = 32
 	maxRedirectEntryBytes = 512
@@ -43,6 +46,11 @@ const (
 type Limits struct {
 	MaxWriteBytes     int64 `yaml:"max_write_bytes"`
 	RequestsPerMinute int   `yaml:"requests_per_minute"`
+	// MaxSessionsPerClient caps the live MCP sessions one token or OAuth
+	// grant holds. Hosted assistants (ChatGPT, Meta Muse) may open a session
+	// per tool call and leave it to the idle timeout, so the cap is a number
+	// of calls per idle window for them, not a number of open windows.
+	MaxSessionsPerClient int `yaml:"max_sessions_per_client"`
 }
 
 // Logs controls write-log rotation.
@@ -104,7 +112,7 @@ func Default() Config {
 		Listen:       "127.0.0.1:8080",
 		BearerTokens: true,
 		OAuth:        OAuth{Enabled: true, RedirectAllowlist: DefaultRedirectAllowlist()},
-		Limits:       Limits{MaxWriteBytes: 1 << 20, RequestsPerMinute: 60},
+		Limits:       Limits{MaxWriteBytes: 1 << 20, RequestsPerMinute: 180, MaxSessionsPerClient: 200},
 		Logs:         Logs{MaxSizeMB: 5, Keep: 3},
 	}
 }
@@ -261,6 +269,9 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.RequestsPerMinute <= 0 || c.Limits.RequestsPerMinute > maxRPMCap {
 		add("limits.requests_per_minute: must be between 1 and %d", maxRPMCap)
+	}
+	if c.Limits.MaxSessionsPerClient <= 0 || c.Limits.MaxSessionsPerClient > maxSessionsCap {
+		add("limits.max_sessions_per_client: must be between 1 and %d", maxSessionsCap)
 	}
 	if c.Logs.MaxSizeMB <= 0 || c.Logs.MaxSizeMB > maxLogSizeMBCap {
 		add("logs.max_size_mb: must be between 1 and %d", maxLogSizeMBCap)

@@ -13,8 +13,12 @@ import (
 
 // neverAccessible are folder names no tool may read or write at any depth
 // (vaults may contain nested git repos), matched case-insensitively because
-// default macOS and Windows filesystems are case-insensitive.
-var neverAccessible = []string{".git", ".obsidian", ".cortex-mcp"}
+// default macOS and Windows filesystems are case-insensitive. .stversions
+// and .stfolder are Syncthing's: a vault synced with file versioning holds
+// old copies of notes in .stversions, which searches would mix with the
+// current ones and which Syncthing never syncs back, so an edit there would
+// be lost without notice.
+var neverAccessible = []string{".git", ".obsidian", ".cortex-mcp", ".stversions", ".stfolder"}
 
 // trashDir receives deleted notes. It is readable and may be a move
 // source (to restore a note), but no tool writes into it directly. Only the

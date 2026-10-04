@@ -17,8 +17,15 @@ import (
 const initBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",` +
 	`"capabilities":{},"clientInfo":{"name":"raw","version":"0"}}}`
 
-// manySessions lifts the rate limit so a test can open many sessions in a row.
-func manySessions(c *config.Config) { c.Limits.RequestsPerMinute = 60000 }
+// testCap is a small session cap, so tests reach it quickly.
+const testCap = 4
+
+// manySessions lifts the rate limit so a test can open many sessions in a
+// row, and sets the session cap to testCap.
+func manySessions(c *config.Config) {
+	c.Limits.RequestsPerMinute = 60000
+	c.Limits.MaxSessionsPerClient = testCap
+}
 
 func tryConnect(e env, token string) (*mcp.ClientSession, error) {
 	client := mcp.NewClient(&mcp.Implementation{Name: "it", Version: "test"}, nil)
@@ -80,15 +87,15 @@ func TestSessionCapPerToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	var open []*mcp.ClientSession
-	for i := range maxSessionsPerClient {
-		if i%4 == 0 { // spread the sessions over several cached servers
+	for i := range testCap {
+		if i%2 == 0 { // spread the sessions over several cached servers
 			e.clock.Advance(instructionsTTL + time.Second)
 		}
 		open = append(open, connect(t, e, e.secret))
 	}
 	code, body, retry, sid := rawInit(t, e, e.secret)
 	if code != http.StatusTooManyRequests || sid != "" {
-		t.Fatalf("session %d: status %d, session %q; want 429 and none", maxSessionsPerClient+1, code, sid)
+		t.Fatalf("session %d: status %d, session %q; want 429 and none", testCap+1, code, sid)
 	}
 	if retry == "" || strings.TrimSpace(body) != "too many sessions" {
 		t.Fatalf("429 must carry Retry-After and a fixed body: %q %q", retry, body)
@@ -110,7 +117,7 @@ func TestIdleSessionsFreeTheirSlot(t *testing.T) {
 	const idle = 2 * time.Second
 	e := setupOpts(t, manySessions, func(o *Options) { o.idleTimeout = idle })
 	start := time.Now()
-	for range maxSessionsPerClient {
+	for range testCap {
 		connect(t, e, e.secret)
 	}
 	code, _, _, _ := rawInit(t, e, e.secret)
@@ -122,7 +129,7 @@ func TestIdleSessionsFreeTheirSlot(t *testing.T) {
 
 func TestSessionCapHoldsUnderConcurrency(t *testing.T) {
 	e := setup(t, manySessions)
-	const n = 2 * maxSessionsPerClient
+	const n = 2 * testCap
 	codes := make(chan int, n)
 	var wg sync.WaitGroup
 	for range n {
@@ -144,8 +151,8 @@ func TestSessionCapHoldsUnderConcurrency(t *testing.T) {
 			t.Errorf("unexpected status %d", c)
 		}
 	}
-	if ok != maxSessionsPerClient || limited != n-maxSessionsPerClient {
-		t.Fatalf("%d sessions opened, %d refused; want %d and %d", ok, limited, maxSessionsPerClient, n-maxSessionsPerClient)
+	if ok != testCap || limited != n-testCap {
+		t.Fatalf("%d sessions opened, %d refused; want %d and %d", ok, limited, testCap, n-testCap)
 	}
 }
 
@@ -153,8 +160,23 @@ func TestRequestsWithoutSessionThatFailDoNotHoldASlot(t *testing.T) {
 	e := setup(t, manySessions)
 	// A ping without a session id makes the SDK open a session and close it
 	// again at once, because it was never initialized.
-	for range 2 * maxSessionsPerClient {
+	for range 2 * testCap {
 		post(t, e.url, "Bearer "+e.secret)
 	}
 	eventuallyConnects(t, e, e.secret, 5*time.Second)
+}
+
+func TestSessionCapFollowsConfig(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		manySessions(c)
+		c.Limits.MaxSessionsPerClient = 2
+	})
+	for i := range 2 {
+		if code, _, _, _ := rawInit(t, e, e.secret); code != http.StatusOK {
+			t.Fatalf("session %d: %d, want 200", i+1, code)
+		}
+	}
+	if code, _, _, _ := rawInit(t, e, e.secret); code != http.StatusTooManyRequests {
+		t.Fatalf("session 3 with a cap of 2: %d, want 429", code)
+	}
 }
