@@ -8,7 +8,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/zitadel/oidc/v3 v3.51.11
+	github.com/zitadel/oidc/v3 v3.51.13
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.60.1
